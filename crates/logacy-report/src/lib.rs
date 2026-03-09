@@ -53,6 +53,7 @@ pub const TEMPLATES: &[&str] = &[
     "subsystems",
     "reviews",
     "ownership",
+    "identities",
 ];
 
 // ── DateRange ────────────────────────────────────────────────────────────────
@@ -113,6 +114,7 @@ pub fn run_report(
         "subsystems" => report_subsystems(conn, range)?,
         "reviews" => report_reviews(conn, range)?,
         "ownership" => report_ownership(conn, range)?,
+        "identities" => report_identities(conn, range)?,
         _ => anyhow::bail!("unknown template: {}", template),
     };
 
@@ -383,6 +385,123 @@ fn report_overview(conn: &Connection, dr: &DateRange) -> Result<(String, String)
         content.push_str(&vegalite_div("subsystems", "Subsystem Breakdown", &spec));
     }
 
+    // Language Distribution (horizontal bar, top 15)
+    let data = query_json_array(
+        conn,
+        &format!(
+            "SELECT cf.language, count(*) AS file_changes
+             FROM commit_files cf
+             JOIN commits c ON c.hash = cf.commit_hash
+             WHERE cf.language != 'Other'{cf_date}
+             GROUP BY cf.language ORDER BY file_changes DESC LIMIT 15"
+        ),
+        &[],
+    )?;
+    if !data.is_empty() {
+        let spec = json!({
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "width": "container", "height": 400,
+            "data": {"values": data},
+            "mark": "bar",
+            "encoding": {
+                "y": {"field": "language", "type": "nominal", "sort": "-x", "title": null},
+                "x": {"field": "file_changes", "type": "quantitative", "title": "File Changes"},
+                "color": {"field": "file_changes", "type": "quantitative",
+                          "scale": {"scheme": "tealblues"}, "legend": null},
+                "tooltip": [
+                    {"field": "language", "type": "nominal"},
+                    {"field": "file_changes", "type": "quantitative"}
+                ]
+            }
+        });
+        content.push_str(&vegalite_div("language-dist", "Language Distribution", &spec));
+    }
+
+    // Work Type Breakdown (bar: test/docs/build/source × lines changed)
+    let data = query_json_array(
+        conn,
+        &format!(
+            "SELECT cf.category,
+                    COALESCE(SUM(cf.insertions), 0) + COALESCE(SUM(cf.deletions), 0) AS lines_changed,
+                    count(*) AS file_changes
+             FROM commit_files cf
+             JOIN commits c ON c.hash = cf.commit_hash
+             WHERE 1=1{cf_date}
+             GROUP BY cf.category ORDER BY lines_changed DESC"
+        ),
+        &[],
+    )?;
+    if !data.is_empty() {
+        let spec = json!({
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "width": "container", "height": 200,
+            "data": {"values": data},
+            "mark": "bar",
+            "encoding": {
+                "y": {"field": "category", "type": "nominal", "sort": "-x", "title": null},
+                "x": {"field": "lines_changed", "type": "quantitative", "title": "Lines Changed"},
+                "color": {
+                    "field": "category", "type": "nominal",
+                    "scale": {
+                        "domain": ["source", "test", "docs", "build"],
+                        "range": ["#4c72b0", "#55a868", "#c44e52", "#8172b2"]
+                    },
+                    "legend": null
+                },
+                "tooltip": [
+                    {"field": "category", "type": "nominal"},
+                    {"field": "lines_changed", "type": "quantitative"},
+                    {"field": "file_changes", "type": "quantitative", "title": "File Changes"}
+                ]
+            }
+        });
+        content.push_str(&vegalite_div("work-type", "Work Type Breakdown", &spec));
+    }
+
+    // Commit Activity Heatmap (weekday × hour-of-day, UTC)
+    let data = query_json_array(
+        conn,
+        &format!(
+            "SELECT CAST(strftime('%w', author_date) AS INTEGER) AS dow,
+                    CAST(strftime('%H', author_date) AS INTEGER) AS hour,
+                    count(*) AS commits
+             FROM v_commits WHERE author_is_bot = 0{df}
+             GROUP BY dow, hour"
+        ),
+        &[],
+    )?;
+    if !data.is_empty() {
+        let spec = json!({
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "width": "container", "height": 200,
+            "data": {"values": data},
+            "mark": "rect",
+            "encoding": {
+                "x": {"field": "hour", "type": "ordinal", "title": "Hour (UTC)"},
+                "y": {
+                    "field": "dow", "type": "ordinal", "title": "Day",
+                    "sort": [0, 1, 2, 3, 4, 5, 6],
+                    "axis": {"labelExpr": "['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][datum.value]"}
+                },
+                "color": {
+                    "field": "commits", "type": "quantitative",
+                    "scale": {"scheme": "blues"}, "title": "Commits"
+                },
+                "tooltip": [
+                    {"field": "dow", "type": "ordinal", "title": "Day"},
+                    {"field": "hour", "type": "ordinal", "title": "Hour"},
+                    {"field": "commits", "type": "quantitative"}
+                ]
+            },
+            "config": {"axis": {"grid": false}}
+        });
+        content.push_str(&vegalite_div(
+            "commit-heatmap",
+            "Commit Activity Heatmap (UTC)",
+            &spec,
+        ));
+    }
+
     Ok(("Overview".to_string(), content))
 }
 
@@ -499,6 +618,52 @@ fn report_contributors(conn: &Connection, dr: &DateRange) -> Result<(String, Str
             }
         });
         content.push_str(&vegalite_div("reviewer-reviews", "Top Reviewers", &spec));
+    }
+
+    // Contributor Language Profile (top 20 contributors × their primary languages)
+    let data = query_json_array(
+        conn,
+        &format!(
+            "SELECT i.canonical_name AS author, cf.language, count(*) AS file_changes
+             FROM identities i
+             JOIN commits c ON c.author_id = i.id
+             JOIN commit_files cf ON cf.commit_hash = c.hash
+             WHERE i.is_bot = 0 AND cf.language != 'Other'{df_cf}
+               AND i.id IN (
+                   SELECT c2.author_id FROM commits c2
+                   WHERE c2.author_id IS NOT NULL{df2}
+                   GROUP BY c2.author_id ORDER BY count(*) DESC LIMIT 20
+               )
+             GROUP BY i.canonical_name, cf.language
+             ORDER BY file_changes DESC",
+            df_cf = dr.sql("c.author_date"),
+            df2 = dr.sql("c2.author_date"),
+        ),
+        &[],
+    )?;
+    if !data.is_empty() {
+        let spec = json!({
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "width": "container", "height": 500,
+            "data": {"values": data},
+            "mark": "bar",
+            "encoding": {
+                "y": {"field": "author", "type": "nominal", "sort": "-x", "title": null},
+                "x": {"field": "file_changes", "type": "quantitative", "stack": "normalize",
+                       "title": "Language Share"},
+                "color": {"field": "language", "type": "nominal", "title": "Language"},
+                "tooltip": [
+                    {"field": "author", "type": "nominal"},
+                    {"field": "language", "type": "nominal"},
+                    {"field": "file_changes", "type": "quantitative"}
+                ]
+            }
+        });
+        content.push_str(&vegalite_div(
+            "contributor-languages",
+            "Contributor Language Profile (Top 20)",
+            &spec,
+        ));
     }
 
     Ok(("Contributors".to_string(), content))
@@ -653,6 +818,130 @@ fn report_subsystems(conn: &Connection, dr: &DateRange) -> Result<(String, Strin
             }
         });
         content.push_str(&vegalite_div("bus-factor", "Bus Factor by Subsystem", &spec));
+    }
+
+    // Dormant Subsystems — no commits in >180 days
+    let (headers, rows) = query_table(
+        conn,
+        "SELECT s.name AS subsystem,
+                max(c.author_date) AS last_activity,
+                CAST(julianday('now') - julianday(max(c.author_date)) AS INTEGER) AS days_dormant
+         FROM subsystems s
+         JOIN file_subsystems fs ON fs.subsystem_id = s.id
+         JOIN commit_files cf ON cf.path = fs.path
+         JOIN commits c ON c.hash = cf.commit_hash
+         GROUP BY s.id
+         HAVING days_dormant > 180
+         ORDER BY days_dormant DESC",
+        &[],
+    )?;
+    if !rows.is_empty() {
+        let header_refs: Vec<&str> = headers.iter().map(|s| s.as_str()).collect();
+        content.push_str(&html_table_section(
+            "Dormant Subsystems (>180 days inactive)",
+            &header_refs,
+            &rows,
+        ));
+    }
+
+    // Unmapped Files — files not in any subsystem
+    let (headers, rows) = query_table(
+        conn,
+        "SELECT
+            (SELECT count(DISTINCT cf.path) FROM commit_files cf
+             LEFT JOIN file_subsystems fs ON fs.path = cf.path
+             WHERE fs.path IS NULL) AS unmapped_files,
+            (SELECT count(DISTINCT cf.path) FROM commit_files cf) AS total_files,
+            CAST(
+                100.0 * (SELECT count(DISTINCT cf.path) FROM commit_files cf
+                          LEFT JOIN file_subsystems fs ON fs.path = cf.path
+                          WHERE fs.path IS NULL)
+                / MAX(1, (SELECT count(DISTINCT cf.path) FROM commit_files cf))
+            AS INTEGER) AS unmapped_pct",
+        &[],
+    )?;
+    if !rows.is_empty() {
+        let header_refs: Vec<&str> = headers.iter().map(|s| s.as_str()).collect();
+        content.push_str(&html_table_section(
+            "Unmapped Files Overview",
+            &header_refs,
+            &rows,
+        ));
+    }
+
+    // Unmapped files breakdown by language
+    let data = query_json_array(
+        conn,
+        "SELECT cf.language, count(DISTINCT cf.path) AS files
+         FROM commit_files cf
+         LEFT JOIN file_subsystems fs ON fs.path = cf.path
+         WHERE fs.path IS NULL AND cf.language != 'Other'
+         GROUP BY cf.language ORDER BY files DESC LIMIT 15",
+        &[],
+    )?;
+    if !data.is_empty() {
+        let spec = json!({
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "width": "container", "height": 300,
+            "data": {"values": data},
+            "mark": "bar",
+            "encoding": {
+                "y": {"field": "language", "type": "nominal", "sort": "-x", "title": null},
+                "x": {"field": "files", "type": "quantitative", "title": "Unmapped Files"},
+                "color": {"value": "#c44e52"},
+                "tooltip": [
+                    {"field": "language", "type": "nominal"},
+                    {"field": "files", "type": "quantitative"}
+                ]
+            }
+        });
+        content.push_str(&vegalite_div(
+            "unmapped-by-language",
+            "Unmapped Files by Language",
+            &spec,
+        ));
+    }
+
+    // Subsystem Maintainer Summary — top recent committer + top code owner per subsystem
+    let (headers, rows) = query_table(
+        conn,
+        "SELECT s.name AS subsystem,
+                recent.author AS top_recent_committer,
+                recent.commits AS recent_commits_90d,
+                owner.author AS top_code_owner,
+                owner.lines_owned
+         FROM subsystems s
+         LEFT JOIN (
+             SELECT fs.subsystem_id, i.canonical_name AS author, count(DISTINCT c.hash) AS commits,
+                    ROW_NUMBER() OVER (PARTITION BY fs.subsystem_id ORDER BY count(DISTINCT c.hash) DESC) AS rk
+             FROM file_subsystems fs
+             JOIN commit_files cf ON cf.path = fs.path
+             JOIN commits c ON c.hash = cf.commit_hash
+             JOIN identities i ON c.author_id = i.id
+             WHERE i.is_bot = 0
+               AND c.author_date >= datetime('now', '-90 days')
+             GROUP BY fs.subsystem_id, i.id
+         ) recent ON recent.subsystem_id = s.id AND recent.rk = 1
+         LEFT JOIN (
+             SELECT fs.subsystem_id, i.canonical_name AS author, SUM(fo.lines_owned) AS lines_owned,
+                    ROW_NUMBER() OVER (PARTITION BY fs.subsystem_id ORDER BY SUM(fo.lines_owned) DESC) AS rk
+             FROM file_subsystems fs
+             JOIN file_ownership fo ON fo.path = fs.path
+             JOIN (SELECT id FROM blame_snapshots ORDER BY id DESC LIMIT 1) bs ON bs.id = fo.snapshot_id
+             JOIN identities i ON fo.identity_id = i.id
+             WHERE i.is_bot = 0
+             GROUP BY fs.subsystem_id, i.id
+         ) owner ON owner.subsystem_id = s.id AND owner.rk = 1
+         ORDER BY s.name",
+        &[],
+    )?;
+    if !rows.is_empty() {
+        let header_refs: Vec<&str> = headers.iter().map(|s| s.as_str()).collect();
+        content.push_str(&html_table_section(
+            "Subsystem Maintainer Summary",
+            &header_refs,
+            &rows,
+        ));
     }
 
     Ok(("Subsystems".to_string(), content))

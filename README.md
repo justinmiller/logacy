@@ -110,6 +110,8 @@ logacy index --all     # follow all commits, not just first-parent
 - Ticket and component extraction from commit subjects (configurable regex)
 - Commit trailers: Signed-off-by, Reviewed-by, Tested-by, Change-Id, etc.
 - Per-file diff statistics: path, status (A/M/D/R), insertions, deletions
+- File classification: language (from extension/filename) and category
+  (source, test, docs, build — from path heuristics)
 - Aggregate insertions/deletions per commit
 
 **Incremental indexing** is the default. logacy records `last_indexed_commit`
@@ -190,9 +192,9 @@ logacy report --output /tmp/reports --all    # custom output directory
 
 | Template | Description |
 |----------|-------------|
-| `overview` | Project dashboard: commits over time, top contributors, org share, subsystem breakdown |
-| `contributors` | Per-author detail: commit counts, review counts, subsystem involvement, tenure |
-| `subsystems` | Per-subsystem health: activity, contributor count, reviewer coverage, bus factor |
+| `overview` | Project dashboard: commits over time, top contributors, org share, subsystem breakdown, language distribution, work type breakdown, commit activity heatmap |
+| `contributors` | Per-author detail: commit counts, review counts, subsystem involvement, tenure, language profile |
+| `subsystems` | Per-subsystem health: activity, contributor count, reviewer coverage, bus factor, dormant subsystem detection, unmapped files, maintainer summary |
 | `reviews` | Review network: who reviews whom, review counts, cross-org patterns |
 | `ownership` | Blame-based ownership: lines by author/org/subsystem, code age distribution |
 
@@ -349,6 +351,8 @@ use `INSERT OR IGNORE` semantics for idempotent reindexing.
 | `status` | TEXT | A (add), M (modify), D (delete), R (rename) |
 | `insertions` | INTEGER | Lines added in this file |
 | `deletions` | INTEGER | Lines removed in this file |
+| `language` | TEXT | Detected language (e.g., C, Python, Rust, Shell, Other) |
+| `category` | TEXT | File category: source, test, docs, or build |
 
 **`identities`** — Canonical contributor identities.
 
@@ -463,7 +467,8 @@ a designated reviewer for that subsystem.
 
 Indexes on `commits(author_date)`, `commits(ticket)`, `commits(component)`,
 `commits(author_id)`, `trailers(key)`, `trailers(identity_id)`,
-`commit_files(path)`, `blame_lines(identity_id)`, `blame_lines(orig_commit)`.
+`commit_files(path)`, `commit_files(language)`, `blame_lines(identity_id)`,
+`blame_lines(orig_commit)`.
 
 ## Example Queries
 
@@ -477,6 +482,28 @@ WHERE i.is_bot = 0
 GROUP BY i.id
 ORDER BY commits DESC
 LIMIT 10;
+```
+
+### Language breakdown
+
+```sql
+SELECT language, count(*) as file_changes,
+       sum(insertions) as lines_added
+FROM commit_files
+WHERE language != 'Other'
+GROUP BY language
+ORDER BY file_changes DESC;
+```
+
+### Work type breakdown (test/docs/build/source)
+
+```sql
+SELECT category,
+       count(*) as file_changes,
+       sum(insertions) + sum(deletions) as lines_changed
+FROM commit_files
+GROUP BY category
+ORDER BY lines_changed DESC;
 ```
 
 ### Most changed files

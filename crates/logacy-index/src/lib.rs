@@ -9,6 +9,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
 use rusqlite::Connection;
 
+use logacy_core::classify;
 use logacy_core::config::Config;
 
 pub struct IndexOptions {
@@ -44,6 +45,8 @@ struct FileChangeRow {
     status: String,
     insertions: Option<i32>,
     deletions: Option<i32>,
+    language: &'static str,
+    category: &'static str,
 }
 
 pub fn run_index(
@@ -208,8 +211,8 @@ pub fn run_index(
         )?;
 
         let mut insert_file = tx.prepare(
-            "INSERT OR IGNORE INTO commit_files (commit_hash, path, status, insertions, deletions)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT OR IGNORE INTO commit_files (commit_hash, path, status, insertions, deletions, language, category)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?;
 
         // Prepare diff resource cache if we need file stats
@@ -265,6 +268,8 @@ pub fn run_index(
                     file.status,
                     file.insertions,
                     file.deletions,
+                    file.language,
+                    file.category,
                 ])?;
             }
 
@@ -341,11 +346,16 @@ fn compute_commit_diff_stats(
 
                 resource_cache.clear_resource_cache_keep_allocation();
 
+                let lang = classify::language_from_path(&location);
+                let cat = classify::category_from_path(&location);
+
                 file_changes.push(FileChangeRow {
                     path: location,
                     status: status.to_string(),
                     insertions: ins,
                     deletions: del,
+                    language: lang,
+                    category: cat,
                 });
 
                 Ok::<_, std::convert::Infallible>(std::ops::ControlFlow::Continue(()))

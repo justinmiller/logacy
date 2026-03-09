@@ -175,6 +175,8 @@ CREATE TABLE IF NOT EXISTS commit_files (
     status      TEXT NOT NULL,
     insertions  INTEGER,
     deletions   INTEGER,
+    language    TEXT NOT NULL DEFAULT 'Other',
+    category    TEXT NOT NULL DEFAULT 'source',
     PRIMARY KEY (commit_hash, path)
 );
 
@@ -237,6 +239,7 @@ CREATE INDEX IF NOT EXISTS idx_commits_author    ON commits(author_id);
 CREATE INDEX IF NOT EXISTS idx_trailers_key      ON trailers(key);
 CREATE INDEX IF NOT EXISTS idx_trailers_identity ON trailers(identity_id);
 CREATE INDEX IF NOT EXISTS idx_commit_files_path ON commit_files(path);
+CREATE INDEX IF NOT EXISTS idx_commit_files_language ON commit_files(language);
 CREATE INDEX IF NOT EXISTS idx_blame_lines_identity ON blame_lines(identity_id);
 CREATE INDEX IF NOT EXISTS idx_blame_lines_commit   ON blame_lines(orig_commit);
 

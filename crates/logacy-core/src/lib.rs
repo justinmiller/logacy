@@ -1,3 +1,4 @@
+pub mod classify;
 pub mod config;
 
 use std::path::{Path, PathBuf};
