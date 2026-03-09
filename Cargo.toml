@@ -1,0 +1,42 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/logacy-cli",
+    "crates/logacy-core",
+    "crates/logacy-db",
+    "crates/logacy-index",
+    "crates/logacy-blame",
+    "crates/logacy-maintain",
+    "crates/logacy-report",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+logacy-core = { path = "crates/logacy-core" }
+logacy-db = { path = "crates/logacy-db" }
+logacy-index = { path = "crates/logacy-index" }
+logacy-blame = { path = "crates/logacy-blame" }
+logacy-maintain = { path = "crates/logacy-maintain" }
+logacy-report = { path = "crates/logacy-report" }
+
+anyhow = "*"
+clap = { version = "*", features = ["derive"] }
+gix = { version = "*", default-features = false, features = ["max-performance-safe", "mailmap", "blob-diff"] }
+git2 = "*"
+rusqlite = { version = "*", features = ["bundled"] }
+serde = { version = "*", features = ["derive"] }
+toml = "*"
+regex = "*"
+rayon = "*"
+indicatif = "*"
+comfy-table = "*"
+minijinja = "*"
+chrono = { version = "*", features = ["serde"] }
+tracing = "*"
+tracing-subscriber = { version = "*", features = ["env-filter"] }
+glob = "*"
+serde_json = "*"

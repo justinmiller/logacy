@@ -1,0 +1,13 @@
+[package]
+name = "logacy-maintain"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+logacy-core.workspace = true
+logacy-db.workspace = true
+anyhow.workspace = true
+rusqlite.workspace = true
+tracing.workspace = true
+glob.workspace = true
+chrono.workspace = true

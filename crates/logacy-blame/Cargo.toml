@@ -1,0 +1,16 @@
+[package]
+name = "logacy-blame"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+logacy-core.workspace = true
+logacy-db.workspace = true
+anyhow.workspace = true
+rusqlite.workspace = true
+git2.workspace = true
+glob.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+indicatif.workspace = true
+rayon.workspace = true

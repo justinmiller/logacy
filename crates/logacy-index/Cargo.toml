@@ -1,0 +1,15 @@
+[package]
+name = "logacy-index"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+logacy-core.workspace = true
+logacy-db.workspace = true
+anyhow.workspace = true
+gix.workspace = true
+rusqlite.workspace = true
+regex.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+indicatif.workspace = true

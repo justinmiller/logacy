@@ -1,0 +1,10 @@
+[package]
+name = "logacy-db"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+logacy-core.workspace = true
+anyhow.workspace = true
+rusqlite.workspace = true
+tracing.workspace = true
