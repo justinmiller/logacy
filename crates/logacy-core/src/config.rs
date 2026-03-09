@@ -68,6 +68,17 @@ pub struct IdentityConfig {
     pub bot_names: Vec<String>,
     #[serde(default)]
     pub orgs: Vec<OrgDomain>,
+    #[serde(default)]
+    pub org_overrides: Vec<OrgOverride>,
+}
+
+/// Direct org assignment for identities that can't be resolved by email domain
+/// (e.g., contributors using personal email addresses).
+#[derive(Debug, Deserialize)]
+pub struct OrgOverride {
+    pub name: Option<String>,
+    pub email: Option<String>,
+    pub org: String,
 }
 
 #[derive(Debug, Deserialize)]

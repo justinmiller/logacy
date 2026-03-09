@@ -1249,3 +1249,218 @@ fn report_ownership(conn: &Connection, dr: &DateRange) -> Result<(String, String
 
     Ok(("Ownership".to_string(), content))
 }
+
+// ── Report: Identities ──────────────────────────────────────────────────────
+
+fn report_identities(conn: &Connection, dr: &DateRange) -> Result<(String, String)> {
+    let mut content = String::new();
+    let df = dr.sql("c.author_date");
+
+    // Resolution summary — raw pairs, identities, bots, org coverage, trailer resolution
+    let (headers, rows) = query_table(
+        conn,
+        "SELECT
+            (SELECT count(*) FROM identity_aliases) AS raw_aliases,
+            (SELECT count(*) FROM identities) AS identities,
+            (SELECT count(*) FROM identities WHERE is_bot = 1) AS bots,
+            (SELECT count(*) FROM identities WHERE org IS NOT NULL) AS with_org,
+            (SELECT count(*) FROM trailers t
+             WHERE t.key IN ('Signed-off-by','Reviewed-by','Tested-by','Acked-by')
+               AND t.identity_id IS NOT NULL) AS resolved_trailers,
+            (SELECT count(*) FROM trailers t
+             WHERE t.key IN ('Signed-off-by','Reviewed-by','Tested-by','Acked-by')) AS total_trailers",
+        &[],
+    )?;
+    if !rows.is_empty() {
+        let header_refs: Vec<&str> = headers.iter().map(|s| s.as_str()).collect();
+        content.push_str(&html_table_section(
+            "Identity Resolution Summary",
+            &header_refs,
+            &rows,
+        ));
+    }
+
+    // Identity table — canonical name/email alongside all raw aliases, with activity stats
+    let (headers, rows) = query_table(
+        conn,
+        &format!(
+            "SELECT
+                i.canonical_name AS name,
+                i.canonical_email AS email,
+                COALESCE(i.org, '') AS org,
+                CASE WHEN i.is_bot = 1 THEN 'yes' ELSE '' END AS bot,
+                aliases.alias_count AS aliases,
+                aliases.emails AS alias_emails,
+                COALESCE(commits.cnt, 0) AS commits,
+                COALESCE(reviews.cnt, 0) AS reviews
+             FROM identities i
+             LEFT JOIN (
+                 SELECT ia.identity_id,
+                        count(*) AS alias_count,
+                        GROUP_CONCAT(ia.email, ', ') AS emails
+                 FROM identity_aliases ia
+                 GROUP BY ia.identity_id
+             ) aliases ON aliases.identity_id = i.id
+             LEFT JOIN (
+                 SELECT c.author_id, count(*) AS cnt
+                 FROM commits c WHERE 1=1{df}
+                 GROUP BY c.author_id
+             ) commits ON commits.author_id = i.id
+             LEFT JOIN (
+                 SELECT t.identity_id, count(*) AS cnt
+                 FROM trailers t
+                 JOIN commits c ON c.hash = t.commit_hash
+                 WHERE t.key = 'Reviewed-by'{df}
+                 GROUP BY t.identity_id
+             ) reviews ON reviews.identity_id = i.id
+             ORDER BY commits DESC, reviews DESC
+             LIMIT 100"
+        ),
+        &[],
+    )?;
+    if !rows.is_empty() {
+        let header_refs: Vec<&str> = headers.iter().map(|s| s.as_str()).collect();
+        content.push_str(&html_table_section(
+            "Identities (Top 100 by Commits)",
+            &header_refs,
+            &rows,
+        ));
+    }
+
+    // Aliases per identity distribution — how many raw emails map to each identity
+    let data = query_json_array(
+        conn,
+        "SELECT alias_count, count(*) AS identities
+         FROM (
+             SELECT ia.identity_id, count(*) AS alias_count
+             FROM identity_aliases ia
+             GROUP BY ia.identity_id
+         )
+         GROUP BY alias_count ORDER BY alias_count",
+        &[],
+    )?;
+    if !data.is_empty() {
+        let spec = json!({
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "width": "container", "height": 200,
+            "data": {"values": data},
+            "mark": "bar",
+            "encoding": {
+                "x": {"field": "alias_count", "type": "ordinal", "title": "Aliases per Identity"},
+                "y": {"field": "identities", "type": "quantitative", "title": "Identities"},
+                "color": {"value": "#4c72b0"},
+                "tooltip": [
+                    {"field": "alias_count", "type": "ordinal", "title": "Aliases"},
+                    {"field": "identities", "type": "quantitative"}
+                ]
+            }
+        });
+        content.push_str(&vegalite_div(
+            "alias-distribution",
+            "Alias Distribution (Emails per Identity)",
+            &spec,
+        ));
+    }
+
+    // Org distribution — identities per org
+    let data = query_json_array(
+        conn,
+        "SELECT COALESCE(i.org, 'Unaffiliated') AS org, count(*) AS identities
+         FROM identities i
+         WHERE i.is_bot = 0
+         GROUP BY org ORDER BY identities DESC",
+        &[],
+    )?;
+    if data.len() > 1 {
+        let spec = json!({
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "width": "container", "height": 300,
+            "data": {"values": data},
+            "mark": "bar",
+            "encoding": {
+                "y": {"field": "org", "type": "nominal", "sort": "-x", "title": null},
+                "x": {"field": "identities", "type": "quantitative", "title": "Contributors"},
+                "color": {"field": "org", "type": "nominal", "legend": null},
+                "tooltip": [
+                    {"field": "org", "type": "nominal"},
+                    {"field": "identities", "type": "quantitative"}
+                ]
+            }
+        });
+        content.push_str(&vegalite_div(
+            "org-distribution",
+            "Contributors by Organization",
+            &spec,
+        ));
+    }
+
+    // Bot accounts
+    let (headers, rows) = query_table(
+        conn,
+        "SELECT i.canonical_name AS name, i.canonical_email AS email,
+                COALESCE(commits.cnt, 0) AS commits,
+                COALESCE(trailers.cnt, 0) AS trailer_mentions
+         FROM identities i
+         LEFT JOIN (
+             SELECT c.author_id, count(*) AS cnt FROM commits c GROUP BY c.author_id
+         ) commits ON commits.author_id = i.id
+         LEFT JOIN (
+             SELECT t.identity_id, count(*) AS cnt FROM trailers t GROUP BY t.identity_id
+         ) trailers ON trailers.identity_id = i.id
+         WHERE i.is_bot = 1
+         ORDER BY commits DESC",
+        &[],
+    )?;
+    if !rows.is_empty() {
+        let header_refs: Vec<&str> = headers.iter().map(|s| s.as_str()).collect();
+        content.push_str(&html_table_section("Bot Accounts", &header_refs, &rows));
+    }
+
+    // Unresolved trailer values — identity trailers that couldn't be matched
+    let (headers, rows) = query_table(
+        conn,
+        "SELECT t.key, t.value, count(*) AS occurrences
+         FROM trailers t
+         WHERE t.key IN ('Signed-off-by', 'Reviewed-by', 'Tested-by', 'Acked-by')
+           AND t.identity_id IS NULL
+         GROUP BY t.key, t.value
+         ORDER BY occurrences DESC
+         LIMIT 50",
+        &[],
+    )?;
+    if !rows.is_empty() {
+        let header_refs: Vec<&str> = headers.iter().map(|s| s.as_str()).collect();
+        content.push_str(&html_table_section(
+            "Unresolved Trailer Values (Top 50)",
+            &header_refs,
+            &rows,
+        ));
+    }
+
+    // Identities with most aliases — potential merge candidates or complex histories
+    let (headers, rows) = query_table(
+        conn,
+        "SELECT i.canonical_name AS name, i.canonical_email AS email,
+                COALESCE(i.org, '') AS org,
+                count(ia.email) AS alias_count,
+                GROUP_CONCAT(ia.email, ', ') AS all_emails
+         FROM identities i
+         JOIN identity_aliases ia ON ia.identity_id = i.id
+         WHERE i.is_bot = 0
+         GROUP BY i.id
+         HAVING alias_count > 1
+         ORDER BY alias_count DESC
+         LIMIT 30",
+        &[],
+    )?;
+    if !rows.is_empty() {
+        let header_refs: Vec<&str> = headers.iter().map(|s| s.as_str()).collect();
+        content.push_str(&html_table_section(
+            "Multi-Alias Identities (Merged Emails)",
+            &header_refs,
+            &rows,
+        ));
+    }
+
+    Ok(("Identities".to_string(), content))
+}

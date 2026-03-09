@@ -154,6 +154,7 @@ pub fn run_identity(repo_path: &Path, conn: &Connection, config: &Config) -> Res
         "DELETE FROM file_ownership;
          DELETE FROM blame_lines;
          DELETE FROM blame_snapshots;
+         DELETE FROM subsystem_reviewers;
          DELETE FROM identity_aliases;
          UPDATE trailers SET identity_id = NULL;
          UPDATE commits SET author_id = NULL, committer_id = NULL;
@@ -342,6 +343,28 @@ pub fn run_identity(repo_path: &Path, conn: &Connection, config: &Config) -> Res
         println!("Assigned org to {} identities from domain mappings", org_updated);
     }
 
+    // Apply explicit org overrides (for contributors using personal emails)
+    let mut override_count = 0u64;
+    for ovr in &config.identity.org_overrides {
+        let updated = match (&ovr.name, &ovr.email) {
+            (Some(name), _) => tx.execute(
+                "UPDATE identities SET org = ?1 WHERE canonical_name = ?2 AND org IS NULL",
+                rusqlite::params![ovr.org, name],
+            )?,
+            (None, Some(email)) => tx.execute(
+                "UPDATE identities SET org = ?1 WHERE id IN (
+                    SELECT identity_id FROM identity_aliases WHERE email = ?2
+                ) AND org IS NULL",
+                rusqlite::params![ovr.org, email],
+            )?,
+            _ => 0,
+        };
+        override_count += updated as u64;
+    }
+    if override_count > 0 {
+        println!("Applied {} org overrides", override_count);
+    }
+
     tx.commit()?;
 
     println!(
@@ -372,21 +395,38 @@ fn resolve_via_mailmap(
     )
 }
 
-/// For a canonical name with multiple emails, find which email was used most recently.
+/// For a canonical name with multiple emails, find which email was used most recently
+/// across both commit authorship and trailer values.
 fn find_most_recent_email(conn: &Connection, name: &str, emails: &[&str]) -> Result<Option<String>> {
     if emails.is_empty() {
         return Ok(None);
     }
+    let placeholders = logacy_db::sql_placeholders(emails.len());
     let sql = format!(
-        "SELECT author_email FROM commits
-         WHERE author_name = ?1 AND author_email IN ({})
-         ORDER BY author_date DESC LIMIT 1",
-        logacy_db::sql_placeholders(emails.len())
+        "SELECT email FROM (
+             SELECT author_email AS email, author_date AS used_date
+             FROM commits
+             WHERE author_name = ?1 AND author_email IN ({placeholders})
+             UNION ALL
+             SELECT SUBSTR(t.value, INSTR(t.value, '<') + 1,
+                           INSTR(t.value, '>') - INSTR(t.value, '<') - 1) AS email,
+                    c.author_date AS used_date
+             FROM trailers t
+             JOIN commits c ON c.hash = t.commit_hash
+             WHERE INSTR(t.value, '<') > 0
+               AND INSTR(t.value, '>') > INSTR(t.value, '<')
+               AND SUBSTR(t.value, INSTR(t.value, '<') + 1,
+                           INSTR(t.value, '>') - INSTR(t.value, '<') - 1) IN ({placeholders})
+         )
+         ORDER BY used_date DESC LIMIT 1"
     );
     let mut stmt = conn.prepare(&sql)?;
 
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     params.push(Box::new(name.to_string()));
+    for email in emails {
+        params.push(Box::new(email.to_string()));
+    }
     for email in emails {
         params.push(Box::new(email.to_string()));
     }
