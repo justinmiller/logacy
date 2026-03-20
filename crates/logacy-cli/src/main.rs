@@ -81,7 +81,7 @@ enum Commands {
 
     /// Generate HTML reports with embedded Vega-Lite charts
     Report {
-        /// Report template (overview, contributors, subsystems, reviews, ownership)
+        /// Report template (overview, contributors, subsystems, reviews, ownership, files)
         #[arg(long)]
         template: Option<String>,
 
@@ -104,6 +104,18 @@ enum Commands {
 
     /// Show indexing state
     Status,
+
+    /// Start interactive web UI
+    Serve {
+        /// Bind address (default: 127.0.0.1:3000)
+        #[arg(long, default_value = "127.0.0.1:3000")]
+        bind: String,
+
+        /// Base URL for commit links (e.g. https://github.com/owner/repo).
+        /// Auto-detected from git remote if not set.
+        #[arg(long)]
+        url: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -146,6 +158,7 @@ fn main() -> Result<()> {
             cmd_report(&ctx, template, output, all, since, until)
         }
         Commands::Status => cmd_status(&ctx),
+        Commands::Serve { bind, url } => cmd_serve(&ctx, &bind, url.as_deref()),
     }
 }
 
@@ -192,7 +205,9 @@ fn cmd_index(ctx: &LogacyContext, full: bool, first_parent: bool, all: bool) -> 
         include_file_list: config.index.include_file_list,
     };
 
-    logacy_index::run_index(&ctx.repo_path, &conn, &config, &opts)
+    logacy_index::run_index(&ctx.repo_path, &conn, &config, &opts)?;
+    logacy_index::tags::run_tag_index(&ctx.repo_path, &conn, &config, full)?;
+    Ok(())
 }
 
 fn cmd_query(ctx: &LogacyContext, sql: Option<String>, file: Option<PathBuf>, format: &str) -> Result<()> {
@@ -307,9 +322,13 @@ fn cmd_report(
     since: Option<String>,
     until: Option<String>,
 ) -> Result<()> {
+    let config = ctx.load_config()?;
     let conn = logacy_db::open_and_migrate(&ctx.db_path)?;
     let output_dir = output.unwrap_or_else(|| ctx.logacy_dir().join("reports"));
     let range = logacy_report::DateRange { since, until };
+    let opts = logacy_report::ReportOptions {
+        ticket_url: config.repository.ticket_url.clone(),
+    };
 
     let templates: Vec<&str> = if all {
         logacy_report::TEMPLATES.to_vec()
@@ -320,11 +339,23 @@ fn cmd_report(
     };
 
     for tmpl in &templates {
-        let path = logacy_report::run_report(&conn, tmpl, &output_dir, &range)?;
+        let path = logacy_report::run_report(&conn, tmpl, &output_dir, &range, &opts)?;
         println!("Generated {}", path.display());
     }
 
     Ok(())
+}
+
+fn cmd_serve(ctx: &LogacyContext, bind: &str, url: Option<&str>) -> Result<()> {
+    let config = ctx.load_config()?;
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(logacy_web::serve(
+        &ctx.db_path,
+        &ctx.repo_path,
+        bind,
+        url,
+        config.repository.ticket_url.as_deref(),
+    ))
 }
 
 fn cmd_status(ctx: &LogacyContext) -> Result<()> {
@@ -363,7 +394,10 @@ fn cmd_status(ctx: &LogacyContext) -> Result<()> {
     let identity_count: i64 = conn.query_row("SELECT count(*) FROM identities", [], |r| r.get(0))?;
     let subsystem_count: i64 = conn.query_row("SELECT count(*) FROM subsystems", [], |r| r.get(0))?;
     let blame_snapshot_count: i64 = conn.query_row("SELECT count(*) FROM blame_snapshots", [], |r| r.get(0))?;
-    let blame_line_count: i64 = conn.query_row("SELECT count(*) FROM blame_lines", [], |r| r.get(0))?;
+    let blame_hunk_count: i64 = conn.query_row("SELECT count(*) FROM blame_hunks", [], |r| r.get(0))?;
+    let tag_count: i64 = conn.query_row("SELECT count(*) FROM tags", [], |r| r.get(0))?;
+    let annotated_tag_count: i64 = conn.query_row("SELECT count(*) FROM tags WHERE is_annotated = 1", [], |r| r.get(0))?;
+    let release_commit_count: i64 = conn.query_row("SELECT count(*) FROM commit_releases", [], |r| r.get(0))?;
 
     println!("logacy status");
     println!("  Database:       {}", ctx.db_path.display());
@@ -375,7 +409,9 @@ fn cmd_status(ctx: &LogacyContext) -> Result<()> {
     println!("  Identities:     {}", identity_count);
     println!("  Subsystems:     {}", subsystem_count);
     println!("  Blame snapshots:{}", blame_snapshot_count);
-    println!("  Blame lines:    {}", blame_line_count);
+    println!("  Blame hunks:    {}", blame_hunk_count);
+    println!("  Tags:           {} ({} annotated)", tag_count, annotated_tag_count);
+    println!("  Release commits:{}", release_commit_count);
     println!("  Date range:     {} .. {}", date_range.0, date_range.1);
 
     Ok(())

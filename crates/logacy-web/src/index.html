@@ -1,0 +1,1051 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>logacy</title>
+<script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
+<style>
+:root {
+  --bg: #0d1117; --surface: #161b22; --border: #30363d;
+  --text: #e6edf3; --text2: #8b949e; --accent: #58a6ff;
+  --green: #3fb950; --red: #f85149; --purple: #bc8cff; --orange: #d29922;
+  --cyan: #39d2c0;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+       background: var(--bg); color: var(--text); line-height: 1.5; }
+
+.shell { display: flex; height: 100vh; }
+nav { width: 220px; background: var(--surface); border-right: 1px solid var(--border);
+      padding: 1rem 0; flex-shrink: 0; display: flex; flex-direction: column; }
+nav .logo { padding: 0 1rem 1rem; font-size: 1.3rem; font-weight: 700;
+            color: var(--accent); border-bottom: 1px solid var(--border); margin-bottom: 0.5rem; }
+nav a { display: block; padding: 0.5rem 1rem; color: var(--text2); text-decoration: none;
+        font-size: 0.9rem; cursor: pointer; }
+nav a:hover, nav a.active { color: var(--text); background: rgba(88,166,255,0.1); }
+nav .spacer { flex: 1; }
+nav .gh-link { padding: 0.5rem 1rem; font-size: 0.8rem; color: var(--text2); border-top: 1px solid var(--border); }
+nav .gh-link a { display: inline; padding: 0; color: var(--accent); }
+
+main { flex: 1; overflow-y: auto; padding: 1.5rem 2rem; }
+
+.toolbar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1.5rem; flex-wrap: wrap; }
+.toolbar input[type="date"], .toolbar input[type="text"], .toolbar select {
+  background: var(--surface); border: 1px solid var(--border); color: var(--text);
+  padding: 0.4rem 0.6rem; border-radius: 6px; font-size: 0.85rem; }
+.toolbar button, .btn {
+  background: var(--accent); color: #fff; border: none; padding: 0.4rem 1rem;
+  border-radius: 6px; cursor: pointer; font-size: 0.85rem; font-weight: 600; }
+.toolbar button:hover, .btn:hover { opacity: 0.85; }
+.btn-ghost { background: var(--surface); border: 1px solid var(--border); color: var(--text2); }
+.toolbar label { color: var(--text2); font-size: 0.85rem; }
+
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+.stat { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; }
+.stat .val { font-size: 1.8rem; font-weight: 700; color: var(--accent); }
+.stat .lbl { font-size: 0.8rem; color: var(--text2); margin-top: 0.2rem; }
+
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+        padding: 1.25rem; margin-bottom: 1.25rem; }
+.card h3 { font-size: 1rem; margin-bottom: 0.75rem; color: var(--text); }
+.chart { width: 100%; min-height: 200px; }
+
+table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+th { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 2px solid var(--border);
+     color: var(--text2); font-weight: 600; position: sticky; top: 0; background: var(--surface); }
+td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); }
+tr:hover td { background: rgba(88,166,255,0.05); }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+.clickable { cursor: pointer; color: var(--accent); }
+.clickable:hover { text-decoration: underline; }
+.hash { font-family: monospace; font-size: 0.8rem; }
+.hash a { color: var(--text2); text-decoration: none; }
+.hash a:hover { color: var(--accent); text-decoration: underline; }
+.plus { color: var(--green); } .minus { color: var(--red); }
+.tag { display: inline-block; background: rgba(88,166,255,0.15); color: var(--accent);
+       padding: 0.1rem 0.5rem; border-radius: 4px; font-size: 0.75rem; }
+.tag.bot { background: rgba(248,81,73,0.15); color: var(--red); }
+.tag.org { background: rgba(188,140,255,0.15); color: var(--purple); }
+.tag.warn { background: rgba(210,153,34,0.15); color: var(--orange); }
+.tag.trailer { background: rgba(57,210,192,0.15); color: var(--cyan); }
+.email { color: var(--text2); font-size: 0.8rem; }
+.mono { font-family: monospace; font-size: 0.8rem; }
+
+textarea { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border);
+           border-radius: 6px; padding: 0.75rem; font-family: monospace; font-size: 0.85rem;
+           resize: vertical; min-height: 80px; }
+.results-scroll { max-height: 60vh; overflow: auto; }
+
+.subtabs { display: flex; gap: 0; margin-bottom: 1rem; border-bottom: 1px solid var(--border); }
+.subtabs button { background: none; border: none; color: var(--text2); padding: 0.5rem 1rem;
+  cursor: pointer; font-size: 0.85rem; border-bottom: 2px solid transparent; }
+.subtabs button.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+.progress-bar { background: var(--border); border-radius: 4px; height: 8px; overflow: hidden; }
+.progress-bar .fill { height: 100%; border-radius: 4px; transition: width 0.3s; }
+
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1.25rem; }
+@media (max-width: 1100px) { .grid-3 { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 900px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+
+/* Profile header */
+.profile-header { display: flex; gap: 1.5rem; align-items: flex-start; margin-bottom: 1.5rem; }
+.profile-avatar { width: 80px; height: 80px; border-radius: 50%; background: var(--border);
+  display: flex; align-items: center; justify-content: center; font-size: 2rem;
+  color: var(--accent); flex-shrink: 0; font-weight: 700; }
+.profile-info h2 { font-size: 1.5rem; margin-bottom: 0.25rem; }
+.profile-info .profile-email { color: var(--text2); font-size: 0.9rem; }
+.profile-info .profile-meta { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.5rem; }
+.profile-info .profile-meta .tag { font-size: 0.8rem; padding: 0.2rem 0.6rem; }
+.profile-aliases { margin-top: 0.5rem; }
+.profile-aliases code { background: var(--bg); padding: 0.15rem 0.4rem; border-radius: 3px;
+  font-size: 0.75rem; color: var(--text2); margin-right: 0.3rem; display: inline-block; margin-bottom: 0.2rem; }
+.back-link { color: var(--accent); cursor: pointer; font-size: 0.85rem; margin-bottom: 1rem; display: inline-block; }
+.back-link:hover { text-decoration: underline; }
+
+.hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="shell">
+<nav>
+  <div class="logo">logacy</div>
+  <a onclick="showPage('overview')" id="nav-overview">Overview</a>
+  <a onclick="showPage('contributors')" id="nav-contributors">Contributors</a>
+  <a onclick="showPage('identities')" id="nav-identities">Identities</a>
+  <a onclick="showPage('subsystems')" id="nav-subsystems">Subsystems</a>
+  <a onclick="showPage('reviews')" id="nav-reviews">Reviews</a>
+  <a onclick="showPage('releases')" id="nav-releases">Releases</a>
+  <a onclick="showPage('ownership')" id="nav-ownership">Ownership</a>
+  <a onclick="showPage('files')" id="nav-files">Files</a>
+  <a onclick="showPage('hotspots')" id="nav-hotspots">Hotspots</a>
+  <a onclick="showPage('commits')" id="nav-commits">Commits</a>
+  <a onclick="showPage('query')" id="nav-query">SQL Console</a>
+  <div class="spacer"></div>
+  <div class="gh-link" id="gh-nav"></div>
+</nav>
+<main id="main">
+  <div class="toolbar" id="toolbar">
+    <select id="date-preset" onchange="applyPreset()">
+      <option value="">Custom range</option>
+      <option value="1m">Last 1 month</option>
+      <option value="3m">Last 3 months</option>
+      <option value="6m">Last 6 months</option>
+      <option value="1y">Last 1 year</option>
+      <option value="2y">Last 2 years</option>
+      <option value="5y">Last 5 years</option>
+    </select>
+    <label>From</label><input type="date" id="since">
+    <label>To</label><input type="date" id="until">
+    <button onclick="applyFilters()">Apply</button>
+    <button onclick="clearFilters()" class="btn-ghost">Clear</button>
+  </div>
+  <div id="page-overview"></div>
+  <div id="page-contributors" class="hidden"></div>
+  <div id="page-identities" class="hidden"></div>
+  <div id="page-identity-profile" class="hidden"></div>
+  <div id="page-org-profile" class="hidden"></div>
+  <div id="page-subsystems" class="hidden"></div>
+  <div id="page-reviews" class="hidden"></div>
+  <div id="page-releases" class="hidden"></div>
+  <div id="page-release-detail" class="hidden"></div>
+  <div id="page-ownership" class="hidden"></div>
+  <div id="page-files" class="hidden"></div>
+  <div id="page-hotspots" class="hidden"></div>
+  <div id="page-commits" class="hidden"></div>
+  <div id="page-query" class="hidden"></div>
+</main>
+</div>
+
+<script>
+let currentPage = 'overview';
+let filters = {};
+let ghBase = null;
+
+function qs(p) {
+  const u = new URLSearchParams();
+  for (const [k,v] of Object.entries({...filters, ...p})) if (v != null && v !== '') u.set(k, v);
+  return u.toString() ? '?' + u.toString() : '';
+}
+async function api(path, extra={}) { return (await fetch('/api/' + path + qs(extra))).json(); }
+
+// ── Forge links ──────────────────────────────────────────────────────────────
+function commitUrl(hash) {
+  if (!ghBase || !hash) return null;
+  try { const u = new URL(ghBase);
+    if (u.hostname.startsWith('review.')) return `${u.origin}/#/q/${hash}`;
+    return `${ghBase}/commit/${hash}`;
+  } catch { return `${ghBase}/commit/${hash}`; }
+}
+function commitLink(hash, short) {
+  if (!hash) return '';
+  const label = short || hash.slice(0,8);
+  const url = commitUrl(hash);
+  return url ? `<a href="${url}" target="_blank" rel="noopener">${label}</a>` : label;
+}
+
+// ── Navigation ───────────────────────────────────────────────────────────────
+function showPage(page) {
+  document.querySelectorAll('[id^="page-"]').forEach(el => el.classList.add('hidden'));
+  document.querySelectorAll('nav a').forEach(a => a.classList.remove('active'));
+  document.getElementById('page-' + page)?.classList.remove('hidden');
+  document.getElementById('nav-' + page)?.classList.add('active');
+  currentPage = page;
+  loadPage(page);
+}
+function applyPreset() {
+  const v = document.getElementById('date-preset').value;
+  if (!v) return;
+  const now = new Date();
+  const units = {m: 'month', y: 'year'};
+  const n = parseInt(v), unit = v.slice(-1);
+  const since = new Date(now);
+  if (unit === 'm') since.setMonth(since.getMonth() - n);
+  else since.setFullYear(since.getFullYear() - n);
+  document.getElementById('since').value = since.toISOString().slice(0, 10);
+  document.getElementById('until').value = '';
+  applyFilters();
+}
+function applyFilters() {
+  const s = document.getElementById('since').value, u = document.getElementById('until').value;
+  filters = {}; if (s) filters.since = s; if (u) filters.until = u;
+  loadPage(currentPage);
+}
+function clearFilters() {
+  document.getElementById('since').value = ''; document.getElementById('until').value = '';
+  document.getElementById('date-preset').value = '';
+  filters = {}; loadPage(currentPage);
+}
+
+// ── Vega-Lite ────────────────────────────────────────────────────────────────
+async function vl(el, spec) {
+  if (typeof el === 'string') el = document.getElementById(el);
+  if (!el) return;
+  spec.$schema = 'https://vega.github.io/schema/vega-lite/v5.json';
+  spec.background = 'transparent';
+  spec.config = {
+    axis: { labelColor: '#8b949e', titleColor: '#8b949e', gridColor: '#21262d', domainColor: '#30363d' },
+    legend: { labelColor: '#8b949e', titleColor: '#8b949e' },
+    view: { stroke: 'transparent' }, title: { color: '#e6edf3' },
+  };
+  if (!spec.width) spec.width = 'container';
+  return vegaEmbed(el, spec, { actions: false, renderer: 'svg' });
+}
+function fmt(n) { return n == null ? '0' : Number(n).toLocaleString(); }
+
+async function loadPage(page) {
+  const loaders = { overview: loadOverview, contributors: loadContributors,
+    identities: loadIdentities, subsystems: loadSubsystems, reviews: loadReviews,
+    releases: loadReleases, ownership: loadOwnership, files: loadFiles, hotspots: loadHotspots, commits: loadCommits, query: loadQuery };
+  if (loaders[page]) await loaders[page]();
+}
+
+// ── Overview ─────────────────────────────────────────────────────────────────
+async function loadOverview() {
+  const el = document.getElementById('page-overview');
+  const [status, timeline, contribs, orgs, langs, heatmap] = await Promise.all([
+    api('status'), api('timeline'), api('contributors',{limit:20}),
+    api('orgs'), api('languages'), api('heatmap')
+  ]);
+  el.innerHTML = `
+    <div class="stats">
+      <div class="stat"><div class="val">${fmt(status.commits)}</div><div class="lbl">Commits</div></div>
+      <div class="stat"><div class="val">${fmt(status.identities)}</div><div class="lbl">Contributors</div></div>
+      <div class="stat"><div class="val">${fmt(status.subsystems)}</div><div class="lbl">Subsystems</div></div>
+      <div class="stat"><div class="val">${fmt(status.tags)}</div><div class="lbl">Releases</div></div>
+      <div class="stat"><div class="val">${status.min_date?.slice(0,10)||'—'}</div><div class="lbl">First commit</div></div>
+      <div class="stat"><div class="val">${status.max_date?.slice(0,10)||'—'}</div><div class="lbl">Last commit</div></div>
+    </div>
+    <div class="card"><h3>Commits Over Time</h3><div class="chart" id="ov-timeline"></div></div>
+    <div class="grid-2">
+      <div class="card"><h3>Top Contributors</h3><div class="chart" id="ov-contribs"></div></div>
+      <div class="card"><h3>Organization Share</h3><div class="chart" id="ov-orgs"></div></div>
+    </div>
+    <div class="grid-2">
+      <div class="card"><h3>Languages</h3><div class="chart" id="ov-langs"></div></div>
+      <div class="card"><h3>Activity Heatmap</h3><div class="chart" id="ov-heat"></div></div>
+    </div>`;
+  await Promise.all([
+    vl('ov-timeline',{height:220,data:{values:timeline},mark:{type:'area',line:true,point:false,opacity:0.7,color:'#58a6ff'},encoding:{x:{field:'month',type:'temporal',title:'Month'},y:{field:'commits',type:'quantitative',title:'Commits'},tooltip:[{field:'month',type:'temporal'},{field:'commits',type:'quantitative'}]}}),
+    vl('ov-contribs',{height:400,data:{values:contribs},mark:'bar',encoding:{y:{field:'author',type:'nominal',sort:'-x',title:null},x:{field:'commits',type:'quantitative',title:'Commits'},color:{value:'#58a6ff'},tooltip:[{field:'author',type:'nominal'},{field:'commits',type:'quantitative'},{field:'org',type:'nominal'}]}}),
+    orgs.length?vl('ov-orgs',{height:300,data:{values:orgs},mark:{type:'area',opacity:0.8},encoding:{x:{field:'month',type:'temporal',title:'Month'},y:{field:'commits',type:'quantitative',stack:'normalize',title:'Share'},color:{field:'org',type:'nominal',title:'Org'},tooltip:[{field:'month',type:'temporal'},{field:'org',type:'nominal'},{field:'commits',type:'quantitative'}]}}):null,
+    vl('ov-langs',{height:350,data:{values:langs},mark:'bar',encoding:{y:{field:'language',type:'nominal',sort:'-x',title:null},x:{field:'file_changes',type:'quantitative',title:'File Changes'},color:{field:'file_changes',type:'quantitative',scale:{scheme:'tealblues'},legend:null},tooltip:[{field:'language',type:'nominal'},{field:'file_changes',type:'quantitative'}]}}),
+    heatmap.length?vl('ov-heat',{height:180,data:{values:heatmap},mark:'rect',encoding:{x:{field:'hour',type:'ordinal',title:'Hour (UTC)'},y:{field:'dow',type:'ordinal',title:'Day',sort:[0,1,2,3,4,5,6],axis:{labelExpr:"['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][datum.value]"}},color:{field:'commits',type:'quantitative',scale:{scheme:'blues'},title:'Commits'},tooltip:[{field:'dow',type:'ordinal',title:'Day'},{field:'hour',type:'ordinal'},{field:'commits',type:'quantitative'}]}}):null,
+  ]);
+}
+
+// ── Contributors ─────────────────────────────────────────────────────────────
+async function loadContributors() {
+  const el = document.getElementById('page-contributors');
+  const data = await api('contributors',{limit:100});
+  let t = `<div class="card"><h3>All Contributors</h3>
+    <table><thead><tr><th>Name</th><th>Org</th><th class="num">Commits</th><th class="num">+</th><th class="num">-</th><th>First</th><th>Last</th></tr></thead><tbody>`;
+  for (const r of data) t += `<tr><td class="clickable" onclick="openIdentityByName('${ea(r.author)}')">${h(r.author)}</td><td>${orgTag(r.org)}</td><td class="num">${fmt(r.commits)}</td><td class="num plus">+${fmt(r.insertions)}</td><td class="num minus">-${fmt(r.deletions)}</td><td>${r.first_commit?.slice(0,10)||''}</td><td>${r.last_commit?.slice(0,10)||''}</td></tr>`;
+  el.innerHTML = t + '</tbody></table></div>';
+}
+
+// ── Identity Profile (full page) ─────────────────────────────────────────────
+async function openIdentity(id) {
+  document.querySelectorAll('[id^="page-"]').forEach(el => el.classList.add('hidden'));
+  document.querySelectorAll('nav a').forEach(a => a.classList.remove('active'));
+  document.getElementById('nav-identities')?.classList.add('active');
+  const el = document.getElementById('page-identity-profile');
+  el.classList.remove('hidden');
+  el.innerHTML = '<p style="color:var(--text2)">Loading profile...</p>';
+  currentPage = 'identity-profile';
+
+  const d = await api('identity/profile', {id});
+  const info = d.info, s = d.stats || {};
+  const initials = (info.name||'?').split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase();
+
+  const aliasHtml = d.aliases.length > 1
+    ? `<div class="profile-aliases">${d.aliases.map(a=>`<code>${h(a.email)}</code>`).join(' ')}</div>` : '';
+
+  const tenureDays = s.first_commit && s.last_commit
+    ? Math.round((new Date(s.last_commit) - new Date(s.first_commit)) / 86400000) : 0;
+  const tenureLabel = tenureDays > 365 ? `${(tenureDays/365).toFixed(1)} years` : `${tenureDays} days`;
+
+  el.innerHTML = `
+    <span class="back-link" onclick="showPage('identities')">&larr; Back to Identities</span>
+    <div class="profile-header">
+      <div class="profile-avatar">${initials}</div>
+      <div class="profile-info">
+        <h2>${h(info.name)}</h2>
+        <div class="profile-email">${h(info.email)}</div>
+        <div class="profile-meta">
+          ${info.org ? `<span class="tag org clickable" onclick="openOrg('${ea(info.org)}')">${h(info.org)}</span>` : '<span class="tag warn">No org</span>'}
+          ${info.bot ? '<span class="tag bot">Bot</span>' : ''}
+          ${d.aliases.length > 1 ? `<span class="tag">${d.aliases.length} aliases</span>` : ''}
+          ${s.first_commit ? `<span class="tag">Active ${tenureLabel}</span>` : ''}
+        </div>
+        ${aliasHtml}
+      </div>
+    </div>
+
+    <!-- Stats row -->
+    <div class="stats">
+      <div class="stat"><div class="val">${fmt(s.commits)}</div><div class="lbl">Commits</div></div>
+      <div class="stat"><div class="val plus">+${fmt(s.insertions)}</div><div class="lbl">Insertions</div></div>
+      <div class="stat"><div class="val minus">-${fmt(s.deletions)}</div><div class="lbl">Deletions</div></div>
+      <div class="stat"><div class="val">${fmt(s.reviews_given)}</div><div class="lbl">Reviews Given</div></div>
+      <div class="stat"><div class="val">${fmt(s.reviews_received)}</div><div class="lbl">Reviews Received</div></div>
+      <div class="stat"><div class="val">${fmt(s.lines_owned)}</div><div class="lbl">Lines Owned</div></div>
+    </div>
+
+    <!-- Trailer participation -->
+    <div class="stats" style="margin-top:-0.5rem">
+      <div class="stat"><div class="val" style="color:var(--cyan)">${fmt(s.signoffs)}</div><div class="lbl">Signed-off-by</div></div>
+      <div class="stat"><div class="val" style="color:var(--cyan)">${fmt(s.tested_by)}</div><div class="lbl">Tested-by</div></div>
+      <div class="stat"><div class="val" style="color:var(--cyan)">${fmt(s.acked_by)}</div><div class="lbl">Acked-by</div></div>
+      <div class="stat"><div class="val">${s.first_commit?.slice(0,10)||'—'}</div><div class="lbl">First Commit</div></div>
+      <div class="stat"><div class="val">${s.last_commit?.slice(0,10)||'—'}</div><div class="lbl">Last Commit</div></div>
+    </div>
+
+    <!-- Charts row 1: timeline + yearly -->
+    <div class="grid-2">
+      <div class="card"><h3>Commit Timeline</h3><div class="chart" id="ip-timeline"></div></div>
+      <div class="card"><h3>Yearly Activity</h3><div class="chart" id="ip-yearly"></div></div>
+    </div>
+
+    <!-- Charts row 2: languages + categories + heatmap -->
+    <div class="grid-3">
+      <div class="card"><h3>Languages</h3><div class="chart" id="ip-langs"></div></div>
+      <div class="card"><h3>Work Type</h3><div class="chart" id="ip-cats"></div></div>
+      <div class="card"><h3>Activity Heatmap</h3><div class="chart" id="ip-heat"></div></div>
+    </div>
+
+    <!-- Subsystems -->
+    ${d.subsystems.length ? `<div class="card"><h3>Subsystems</h3><div class="chart" id="ip-subs"></div></div>` : ''}
+
+    <!-- Reviews + Collaborators -->
+    <div class="grid-3">
+      <div class="card"><h3>Reviews Given To</h3><div id="ip-rg"></div></div>
+      <div class="card"><h3>Reviews Received From</h3><div id="ip-rr"></div></div>
+      <div class="card"><h3>Collaborators</h3><div id="ip-collab"></div></div>
+    </div>
+
+    <!-- File ownership -->
+    ${d.files_owned.length ? `<div class="card"><h3>Top Files Owned (blame)</h3><div id="ip-files"></div></div>` : ''}
+
+    <!-- Recent commits -->
+    <div class="card"><h3>Recent Commits</h3><div id="ip-commits"></div></div>
+  `;
+
+  // Render all charts
+  const promises = [];
+
+  if (d.timeline.length) promises.push(vl('ip-timeline',{height:200,data:{values:d.timeline},mark:{type:'bar',color:'#58a6ff'},encoding:{x:{field:'month',type:'temporal',title:null},y:{field:'commits',type:'quantitative',title:'Commits'}}}));
+
+  if (d.yearly.length) promises.push(vl('ip-yearly',{height:200,data:{values:d.yearly},layer:[
+    {mark:{type:'bar',color:'#58a6ff',opacity:0.6},encoding:{x:{field:'year',type:'ordinal',title:null},y:{field:'commits',type:'quantitative',title:'Commits'}}},
+    {mark:{type:'line',color:'#3fb950',strokeWidth:2,point:true},encoding:{x:{field:'year',type:'ordinal'},y:{field:'insertions',type:'quantitative',title:'Lines'},tooltip:[{field:'year',type:'ordinal'},{field:'commits',type:'quantitative'},{field:'insertions',type:'quantitative'},{field:'deletions',type:'quantitative'}]}}
+  ],resolve:{scale:{y:'independent'}}}));
+
+  if (d.languages.length) promises.push(vl('ip-langs',{height:Math.max(180,d.languages.length*22),data:{values:d.languages},mark:'bar',encoding:{y:{field:'language',type:'nominal',sort:'-x',title:null},x:{field:'file_changes',type:'quantitative',title:'Changes'},color:{value:'#bc8cff'},tooltip:[{field:'language',type:'nominal'},{field:'file_changes',type:'quantitative'},{field:'insertions',type:'quantitative'},{field:'deletions',type:'quantitative'}]}}));
+
+  if (d.categories.length) promises.push(vl('ip-cats',{height:180,data:{values:d.categories},mark:{type:'arc',innerRadius:50},encoding:{theta:{field:'lines_changed',type:'quantitative'},color:{field:'category',type:'nominal',scale:{domain:['source','test','docs','build'],range:['#58a6ff','#3fb950','#d29922','#bc8cff']},title:null},tooltip:[{field:'category',type:'nominal'},{field:'lines_changed',type:'quantitative'},{field:'file_changes',type:'quantitative'}]}}));
+
+  if (d.heatmap.length) promises.push(vl('ip-heat',{height:160,data:{values:d.heatmap},mark:'rect',encoding:{x:{field:'hour',type:'ordinal',title:'Hour'},y:{field:'dow',type:'ordinal',title:null,sort:[0,1,2,3,4,5,6],axis:{labelExpr:"['S','M','T','W','T','F','S'][datum.value]"}},color:{field:'commits',type:'quantitative',scale:{scheme:'blues'},legend:null},tooltip:[{field:'dow',type:'ordinal'},{field:'hour',type:'ordinal'},{field:'commits',type:'quantitative'}]},config:{axis:{grid:false}}}));
+
+  if (d.subsystems.length) promises.push(vl('ip-subs',{height:Math.max(200,d.subsystems.length*24),data:{values:d.subsystems},mark:'bar',encoding:{y:{field:'subsystem',type:'nominal',sort:'-x',title:null},x:{field:'commits',type:'quantitative',title:'Commits'},color:{value:'#d29922'},tooltip:[{field:'subsystem',type:'nominal'},{field:'commits',type:'quantitative'},{field:'insertions',type:'quantitative'},{field:'deletions',type:'quantitative'}]}}));
+
+  await Promise.all(promises);
+
+  // Tables
+  document.getElementById('ip-rg').innerHTML = personTable(d.reviews_given, 'author', 'reviews');
+  document.getElementById('ip-rr').innerHTML = personTable(d.reviews_received, 'reviewer', 'reviews');
+  document.getElementById('ip-collab').innerHTML = personTable(d.collaborators, 'collaborator', 'shared_file_commits', 'org');
+
+  if (d.files_owned.length) {
+    let ft = '<div style="max-height:40vh;overflow:auto"><table><thead><tr><th>Path</th><th class="num">Lines</th><th class="num">%</th></tr></thead><tbody>';
+    for (const f of d.files_owned) ft += `<tr><td class="mono">${h(f.path)}</td><td class="num">${fmt(f.lines_owned)}</td><td class="num">${(f.fraction*100).toFixed(1)}%</td></tr>`;
+    document.getElementById('ip-files').innerHTML = ft + '</tbody></table></div>';
+  }
+
+  let ct = '<div style="max-height:50vh;overflow:auto"><table><thead><tr><th>Hash</th><th>Date</th><th>Subject</th><th>Ticket</th><th class="num">+</th><th class="num">-</th></tr></thead><tbody>';
+  for (const c of d.recent_commits) ct += `<tr><td class="hash">${commitLink(c.hash)}</td><td>${c.author_date?.slice(0,10)||''}</td><td>${h(c.subject)}</td><td>${c.ticket?'<span class="tag">'+h(c.ticket)+'</span>':''}</td><td class="num plus">+${fmt(c.insertions)}</td><td class="num minus">-${fmt(c.deletions)}</td></tr>`;
+  document.getElementById('ip-commits').innerHTML = ct + '</tbody></table></div>';
+}
+
+function personTable(data, nameField, countField, orgField) {
+  if (!data || !data.length) return '<p style="color:var(--text2);font-size:0.85rem">None</p>';
+  let t = '<div style="max-height:30vh;overflow:auto"><table><tbody>';
+  for (const r of data) {
+    const org = orgField && r[orgField] ? ` <span class="tag org clickable" style="font-size:0.65rem" onclick="openOrg('${ea(r[orgField])}')">${h(r[orgField])}</span>` : '';
+    t += `<tr><td class="clickable" onclick="openIdentityByName('${ea(r[nameField])}')" style="font-size:0.85rem">${h(r[nameField])}${org}</td><td class="num" style="font-size:0.85rem">${fmt(r[countField])}</td></tr>`;
+  }
+  return t + '</tbody></table></div>';
+}
+
+// Look up identity ID by name then open profile
+async function openIdentityByName(name) {
+  const list = await api('identities/list', {search: name, limit: 1});
+  if (list.length && list[0].id) { openIdentity(list[0].id); }
+}
+
+// ── Org helpers ──────────────────────────────────────────────────────────────
+function orgTag(org) {
+  if (!org || org === 'Unknown' || org === '') return '<span class="tag warn">none</span>';
+  return `<span class="tag org clickable" onclick="openOrg('${ea(org)}')">${h(org)}</span>`;
+}
+
+async function openOrg(org) {
+  document.querySelectorAll('[id^="page-"]').forEach(el => el.classList.add('hidden'));
+  document.querySelectorAll('nav a').forEach(a => a.classList.remove('active'));
+  const el = document.getElementById('page-org-profile');
+  el.classList.remove('hidden');
+  el.innerHTML = '<p style="color:var(--text2)">Loading organization...</p>';
+  currentPage = 'org-profile';
+
+  const d = await api('org/profile', {org});
+  const s = d.stats || {};
+  const memberCount = d.members ? d.members.filter(m => !m.bot).length : 0;
+
+  el.innerHTML = `
+    <span class="back-link" onclick="showPage('identities')">&larr; Back to Identities</span>
+    <div class="profile-header">
+      <div class="profile-avatar" style="background:rgba(188,140,255,0.2);color:var(--purple)">${(d.org||'?').slice(0,2).toUpperCase()}</div>
+      <div class="profile-info">
+        <h2>${h(d.org)}</h2>
+        <div class="profile-meta">
+          <span class="tag org">${memberCount} contributors</span>
+          ${s.first_commit ? `<span class="tag">Since ${s.first_commit?.slice(0,10)}</span>` : ''}
+          ${d.total_lines_owned ? `<span class="tag">${fmt(d.total_lines_owned)} lines owned</span>` : ''}
+        </div>
+      </div>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><div class="val">${fmt(s.commits)}</div><div class="lbl">Commits</div></div>
+      <div class="stat"><div class="val">${fmt(s.contributors)}</div><div class="lbl">Contributors</div></div>
+      <div class="stat"><div class="val plus">+${fmt(s.insertions)}</div><div class="lbl">Insertions</div></div>
+      <div class="stat"><div class="val minus">-${fmt(s.deletions)}</div><div class="lbl">Deletions</div></div>
+      <div class="stat"><div class="val">${fmt(d.total_lines_owned)}</div><div class="lbl">Lines Owned</div></div>
+      <div class="stat"><div class="val">${fmt(d.internal_reviews)}</div><div class="lbl">Internal Reviews</div></div>
+    </div>
+
+    <div class="card"><h3>Commit Timeline</h3><div class="chart" id="org-timeline"></div></div>
+
+    <div class="grid-2">
+      <div class="card"><h3>Languages</h3><div class="chart" id="org-langs"></div></div>
+      ${d.ownership.length ? '<div class="card"><h3>Lines Owned by Member</h3><div class="chart" id="org-ownership"></div></div>' : ''}
+    </div>
+
+    ${d.subsystems.length ? '<div class="card"><h3>Subsystem Activity</h3><div class="chart" id="org-subs"></div></div>' : ''}
+
+    <div class="grid-2">
+      <div class="card"><h3>Reviews Given To (External)</h3><div id="org-rg"></div></div>
+      <div class="card"><h3>Reviews Received From (External)</h3><div id="org-rr"></div></div>
+    </div>
+
+    <div class="card"><h3>Members (${d.members.length})</h3>
+      <div style="max-height:50vh;overflow:auto"><table><thead><tr><th>Name</th><th>Email</th><th class="num">Commits</th><th class="num">+</th><th class="num">-</th><th class="num">Reviews</th></tr></thead><tbody id="org-members"></tbody></table></div>
+    </div>
+
+    <div class="card"><h3>Recent Commits</h3><div id="org-commits"></div></div>
+  `;
+
+  // Charts
+  const promises = [];
+  if (d.timeline.length) promises.push(vl('org-timeline',{height:220,data:{values:d.timeline},mark:{type:'area',line:true,point:false,opacity:0.7,color:'#bc8cff'},encoding:{x:{field:'month',type:'temporal',title:'Month'},y:{field:'commits',type:'quantitative',title:'Commits'},tooltip:[{field:'month',type:'temporal'},{field:'commits',type:'quantitative'}]}}));
+
+  if (d.languages.length) promises.push(vl('org-langs',{height:Math.max(200,d.languages.length*22),data:{values:d.languages},mark:'bar',encoding:{y:{field:'language',type:'nominal',sort:'-x',title:null},x:{field:'file_changes',type:'quantitative',title:'File Changes'},color:{value:'#bc8cff'},tooltip:[{field:'language',type:'nominal'},{field:'file_changes',type:'quantitative'},{field:'insertions',type:'quantitative'},{field:'deletions',type:'quantitative'}]}}));
+
+  if (d.ownership.length) promises.push(vl('org-ownership',{height:Math.max(200,d.ownership.length*22),data:{values:d.ownership},mark:'bar',encoding:{y:{field:'author',type:'nominal',sort:'-x',title:null},x:{field:'lines',type:'quantitative',title:'Lines Owned'},color:{value:'#3fb950'},tooltip:[{field:'author',type:'nominal'},{field:'lines',type:'quantitative'}]}}));
+
+  if (d.subsystems.length) promises.push(vl('org-subs',{height:Math.max(200,d.subsystems.length*24),data:{values:d.subsystems},mark:'bar',encoding:{y:{field:'subsystem',type:'nominal',sort:'-x',title:null},x:{field:'commits',type:'quantitative',title:'Commits'},color:{field:'contributors',type:'quantitative',scale:{scheme:'purples'},legend:null},tooltip:[{field:'subsystem',type:'nominal'},{field:'commits',type:'quantitative'},{field:'contributors',type:'quantitative'}]}}));
+
+  await Promise.all(promises);
+
+  // Review tables
+  const rgEl = document.getElementById('org-rg');
+  if (d.reviews_given.length) {
+    let t = '<table><tbody>';
+    for (const r of d.reviews_given) t += `<tr><td>${orgTag(r.to_org)}</td><td class="num">${fmt(r.reviews)}</td></tr>`;
+    rgEl.innerHTML = t + '</tbody></table>';
+  } else { rgEl.innerHTML = '<p style="color:var(--text2);font-size:0.85rem">None</p>'; }
+
+  const rrEl = document.getElementById('org-rr');
+  if (d.reviews_received.length) {
+    let t = '<table><tbody>';
+    for (const r of d.reviews_received) t += `<tr><td>${orgTag(r.from_org)}</td><td class="num">${fmt(r.reviews)}</td></tr>`;
+    rrEl.innerHTML = t + '</tbody></table>';
+  } else { rrEl.innerHTML = '<p style="color:var(--text2);font-size:0.85rem">None</p>'; }
+
+  // Members table
+  const tbody = document.getElementById('org-members');
+  for (const m of d.members) {
+    const botTag = m.bot ? ' <span class="tag bot">bot</span>' : '';
+    tbody.insertAdjacentHTML('beforeend', `<tr><td class="clickable" onclick="openIdentity(${m.id})">${h(m.name)}${botTag}</td><td class="email">${h(m.email)}</td><td class="num">${fmt(m.commits)}</td><td class="num plus">+${fmt(m.insertions)}</td><td class="num minus">-${fmt(m.deletions)}</td><td class="num">${fmt(m.reviews)}</td></tr>`);
+  }
+
+  // Recent commits
+  let ct = '<div style="max-height:50vh;overflow:auto"><table><thead><tr><th>Hash</th><th>Author</th><th>Date</th><th>Subject</th><th class="num">+</th><th class="num">-</th></tr></thead><tbody>';
+  for (const c of d.recent_commits) ct += `<tr><td class="hash">${commitLink(c.hash)}</td><td class="clickable" onclick="openIdentityByName('${ea(c.author)}')">${h(c.author)}</td><td>${c.author_date?.slice(0,10)||''}</td><td>${h(c.subject)}</td><td class="num plus">+${fmt(c.insertions)}</td><td class="num minus">-${fmt(c.deletions)}</td></tr>`;
+  document.getElementById('org-commits').innerHTML = ct + '</tbody></table></div>';
+}
+
+// ── Identities List ──────────────────────────────────────────────────────────
+let idSubtab = 'all';
+
+async function loadIdentities() {
+  const el = document.getElementById('page-identities');
+  const [summary, list, orgDist, aliasDist, unresolved, bots, multiAlias] = await Promise.all([
+    api('identities/summary'), api('identities/list'), api('identities/orgs'),
+    api('identities/aliases'), api('identities/unresolved'), api('identities/bots'),
+    api('identities/multi-alias')
+  ]);
+
+  const resPct = summary.trailer_resolution_pct || 0;
+  const orgPct = summary.identities > 0 ? Math.round(summary.with_org / Math.max(1, summary.identities - summary.bots) * 100) : 0;
+
+  let html = `
+    <div class="stats">
+      <div class="stat"><div class="val">${fmt(summary.identities)}</div><div class="lbl">Identities</div></div>
+      <div class="stat"><div class="val">${fmt(summary.raw_aliases)}</div><div class="lbl">Raw Aliases</div></div>
+      <div class="stat"><div class="val">${fmt(summary.bots)}</div><div class="lbl">Bots</div></div>
+      <div class="stat"><div class="val">${fmt(summary.with_org)}</div><div class="lbl">With Org (${orgPct}%)</div>
+        <div class="progress-bar" style="margin-top:4px"><div class="fill" style="width:${orgPct}%;background:var(--purple)"></div></div></div>
+      <div class="stat"><div class="val">${fmt(summary.resolved_trailers)}/${fmt(summary.total_trailers)}</div>
+        <div class="lbl">Trailers (${resPct}%)</div>
+        <div class="progress-bar" style="margin-top:4px"><div class="fill" style="width:${resPct}%;background:var(--green)"></div></div></div>
+    </div>
+    <div class="subtabs">
+      <button class="${idSubtab==='all'?'active':''}" onclick="idSubtab='all';loadIdentities()">All</button>
+      <button class="${idSubtab==='orgs'?'active':''}" onclick="idSubtab='orgs';loadIdentities()">Organizations</button>
+      <button class="${idSubtab==='aliases'?'active':''}" onclick="idSubtab='aliases';loadIdentities()">Multi-Alias</button>
+      <button class="${idSubtab==='bots'?'active':''}" onclick="idSubtab='bots';loadIdentities()">Bots</button>
+      <button class="${idSubtab==='unresolved'?'active':''}" onclick="idSubtab='unresolved';loadIdentities()">Unresolved</button>
+    </div>`;
+
+  if (idSubtab === 'all') {
+    html += `<div class="grid-2"><div class="card"><h3>Contributors by Org</h3><div class="chart" id="id-orgs"></div></div><div class="card"><h3>Alias Distribution</h3><div class="chart" id="id-aliases"></div></div></div>
+    <div class="card"><h3>Identity Directory</h3>
+      <div class="toolbar" style="margin-bottom:0.75rem"><input type="text" id="id-search" placeholder="Search name, email, org..." style="width:300px" onkeydown="if(event.key==='Enter')idSearch()"><button onclick="idSearch()">Search</button></div>
+      <div style="max-height:60vh;overflow:auto"><table><thead><tr><th>Name</th><th>Email</th><th>Org</th><th class="num">Commits</th><th class="num">Reviews</th><th class="num">Aliases</th></tr></thead><tbody id="id-tbody">`;
+    html += idRows(list);
+    html += `</tbody></table></div></div>`;
+  } else if (idSubtab === 'orgs') {
+    html += `<div class="grid-2"><div class="card"><h3>Identities by Organization</h3><div class="chart" id="id-org-chart"></div></div><div class="card"><h3>Breakdown</h3><table><thead><tr><th>Org</th><th class="num">Identities</th><th class="num">Humans</th></tr></thead><tbody>`;
+    for (const r of orgDist) html += `<tr><td>${orgTag(r.org)}</td><td class="num">${fmt(r.identities)}</td><td class="num">${fmt(r.humans)}</td></tr>`;
+    html += `</tbody></table></div></div>`;
+  } else if (idSubtab === 'aliases') {
+    html += `<div class="card"><h3>Alias Distribution</h3><div class="chart" id="id-alias-chart"></div></div>
+    <div class="card"><h3>Multi-Alias Identities</h3><p style="color:var(--text2);font-size:0.8rem;margin-bottom:0.75rem">Multiple email addresses mapped to one identity (company changes, personal/work, typos).</p>
+    <div style="max-height:60vh;overflow:auto"><table><thead><tr><th>Name</th><th>Canonical</th><th>Org</th><th class="num">#</th><th>All Emails</th></tr></thead><tbody>`;
+    for (const r of multiAlias) html += `<tr><td class="clickable" onclick="openIdentityByName('${ea(r.name)}')">${h(r.name)}</td><td class="email">${h(r.email)}</td><td>${orgTag(r.org)}</td><td class="num">${r.alias_count}</td><td class="email" style="max-width:300px;word-break:break-all">${h(r.all_emails)}</td></tr>`;
+    html += `</tbody></table></div></div>`;
+  } else if (idSubtab === 'bots') {
+    html += `<div class="card"><h3>Bot Accounts (${bots.length})</h3>`;
+    if (!bots.length) html += '<p style="color:var(--text2)">None detected.</p>';
+    else { html += `<table><thead><tr><th>Name</th><th>Email</th><th class="num">Commits</th><th class="num">Trailer Mentions</th></tr></thead><tbody>`;
+      for (const r of bots) html += `<tr><td>${h(r.name)}</td><td class="email">${h(r.email)}</td><td class="num">${fmt(r.commits)}</td><td class="num">${fmt(r.trailer_mentions)}</td></tr>`;
+      html += '</tbody></table>'; }
+    html += '</div>';
+  } else if (idSubtab === 'unresolved') {
+    html += `<div class="card"><h3>Unresolved Trailers</h3><p style="color:var(--text2);font-size:0.8rem;margin-bottom:0.75rem">Could not be matched to any identity.</p>`;
+    if (!unresolved.length) html += '<p style="color:var(--green)">All resolved!</p>';
+    else { html += `<table><thead><tr><th>Key</th><th>Value</th><th class="num">Count</th></tr></thead><tbody>`;
+      for (const r of unresolved) html += `<tr><td><span class="tag trailer">${h(r.key)}</span></td><td>${h(r.value)}</td><td class="num">${fmt(r.occurrences)}</td></tr>`;
+      html += '</tbody></table>'; }
+    html += '</div>';
+  }
+
+  el.innerHTML = html;
+
+  if (idSubtab === 'all') await Promise.all([
+    orgDist.length>1?vl('id-orgs',{height:Math.max(200,orgDist.length*24),data:{values:orgDist.filter(d=>d.org!=='Unaffiliated')},mark:'bar',encoding:{y:{field:'org',type:'nominal',sort:'-x',title:null},x:{field:'humans',type:'quantitative',title:'Contributors'},color:{field:'org',type:'nominal',legend:null},tooltip:[{field:'org',type:'nominal'},{field:'humans',type:'quantitative'}]}}):null,
+    aliasDist.length?vl('id-aliases',{height:200,data:{values:aliasDist},mark:{type:'bar',color:'#bc8cff'},encoding:{x:{field:'alias_count',type:'ordinal',title:'Emails per Identity'},y:{field:'identities',type:'quantitative',title:'Identities'},tooltip:[{field:'alias_count',type:'ordinal',title:'Aliases'},{field:'identities',type:'quantitative'}]}}):null,
+  ]);
+  else if (idSubtab === 'orgs' && orgDist.length>1) await vl('id-org-chart',{height:Math.max(250,orgDist.length*24),data:{values:orgDist},mark:'bar',encoding:{y:{field:'org',type:'nominal',sort:'-x',title:null},x:{field:'identities',type:'quantitative',title:'Identities'},color:{field:'org',type:'nominal',legend:null},tooltip:[{field:'org',type:'nominal'},{field:'identities',type:'quantitative'},{field:'humans',type:'quantitative',title:'Humans'}]}});
+  else if (idSubtab === 'aliases' && aliasDist.length) await vl('id-alias-chart',{height:200,data:{values:aliasDist},mark:{type:'bar',color:'#bc8cff'},encoding:{x:{field:'alias_count',type:'ordinal',title:'Emails per Identity'},y:{field:'identities',type:'quantitative',title:'Identities'},tooltip:[{field:'alias_count',type:'ordinal',title:'Aliases'},{field:'identities',type:'quantitative'}]}});
+}
+
+function idRows(list) {
+  let rows = '';
+  for (const r of list) {
+    const botTag = r.bot ? ' <span class="tag bot">bot</span>' : '';
+    rows += `<tr><td class="clickable" onclick="openIdentity(${r.id})">${h(r.name)}${botTag}</td><td class="email">${h(r.email)}</td><td>${orgTag(r.org)}</td><td class="num">${fmt(r.commits)}</td><td class="num">${fmt(r.reviews)}</td><td class="num">${r.aliases}</td></tr>`;
+  }
+  return rows;
+}
+
+async function idSearch() {
+  const q = document.getElementById('id-search')?.value || '';
+  const list = await api('identities/list', {search: q || undefined});
+  const tbody = document.getElementById('id-tbody');
+  if (tbody) tbody.innerHTML = idRows(list);
+}
+
+// ── Subsystems ───────────────────────────────────────────────────────────────
+async function loadSubsystems() {
+  const el = document.getElementById('page-subsystems');
+  const data = await api('subsystems');
+  if (!data.length) { el.innerHTML = '<div class="card"><p style="color:var(--text2)">No subsystem data. Run <code>logacy maintain</code> first.</p></div>'; return; }
+  el.innerHTML = `<div class="card"><h3>Subsystem Activity</h3><div class="chart" id="sub-chart"></div></div><div class="card"><h3>All Subsystems</h3><div id="sub-table"></div></div>`;
+  await vl('sub-chart',{height:Math.max(300,data.length*22),data:{values:data},mark:'bar',encoding:{y:{field:'subsystem',type:'nominal',sort:'-x',title:null},x:{field:'commits',type:'quantitative',title:'Commits'},color:{field:'contributors',type:'quantitative',scale:{scheme:'viridis'},title:'Contributors'},tooltip:[{field:'subsystem',type:'nominal'},{field:'commits',type:'quantitative'},{field:'contributors',type:'quantitative'}]}});
+  let t = '<table><thead><tr><th>Subsystem</th><th class="num">Commits</th><th class="num">Contributors</th></tr></thead><tbody>';
+  for (const r of data) t += `<tr><td>${h(r.subsystem)}</td><td class="num">${fmt(r.commits)}</td><td class="num">${fmt(r.contributors)}</td></tr>`;
+  document.getElementById('sub-table').innerHTML = t + '</tbody></table>';
+}
+
+// ── Reviews ──────────────────────────────────────────────────────────────────
+async function loadReviews() {
+  const el = document.getElementById('page-reviews');
+  const data = await api('reviews');
+  if (!data.length) { el.innerHTML = '<div class="card"><p style="color:var(--text2)">No review data.</p></div>'; return; }
+  el.innerHTML = `<div class="card"><h3>Review Heatmap</h3><div class="chart" id="rev-heat"></div></div><div class="card"><h3>Top Review Pairs</h3><div id="rev-table"></div></div>`;
+  const authors = [...new Set(data.map(d=>d.author))].slice(0,20);
+  const reviewers = [...new Set(data.map(d=>d.reviewer))].slice(0,20);
+  await vl('rev-heat',{height:Math.max(250,authors.length*22),data:{values:data.filter(d=>authors.includes(d.author)&&reviewers.includes(d.reviewer))},mark:'rect',encoding:{x:{field:'reviewer',type:'nominal',title:'Reviewer',axis:{labelAngle:-45}},y:{field:'author',type:'nominal',title:'Author'},color:{field:'reviews',type:'quantitative',scale:{scheme:'blues'},title:'Reviews'},tooltip:[{field:'author',type:'nominal'},{field:'reviewer',type:'nominal'},{field:'reviews',type:'quantitative'}]}});
+  let t = '<table><thead><tr><th>Author</th><th>Reviewer</th><th>Author Org</th><th>Reviewer Org</th><th class="num">Reviews</th></tr></thead><tbody>';
+  for (const r of data) t += `<tr><td class="clickable" onclick="openIdentityByName('${ea(r.author)}')">${h(r.author)}</td><td class="clickable" onclick="openIdentityByName('${ea(r.reviewer)}')">${h(r.reviewer)}</td><td>${orgTag(r.author_org)}</td><td>${orgTag(r.reviewer_org)}</td><td class="num">${r.reviews}</td></tr>`;
+  document.getElementById('rev-table').innerHTML = t + '</tbody></table>';
+}
+
+// ── Releases ─────────────────────────────────────────────────────────────────
+async function loadReleases() {
+  const el = document.getElementById('page-releases');
+  const [summary, list, timeline, cadence, contribs] = await Promise.all([
+    api('releases/summary'), api('releases/list'), api('releases/timeline'),
+    api('releases/cadence'), api('releases/contributors')
+  ]);
+
+  if (summary.tags === 0) {
+    el.innerHTML = '<div class="card"><p style="color:var(--text2)">No tags found. Run <code>logacy index</code> on a repository with tags.</p></div>';
+    return;
+  }
+
+  el.innerHTML = `
+    <div class="stats">
+      <div class="stat"><div class="val">${fmt(summary.tags)}</div><div class="lbl">Tags</div></div>
+      <div class="stat"><div class="val">${fmt(summary.annotated)}</div><div class="lbl">Annotated</div></div>
+      <div class="stat"><div class="val">${fmt(summary.lightweight)}</div><div class="lbl">Lightweight</div></div>
+      <div class="stat"><div class="val">${fmt(summary.mapped_commits)}</div><div class="lbl">Mapped Commits</div></div>
+    </div>
+    <div class="card"><h3>Commits per Release</h3><div class="chart" id="rel-timeline"></div></div>
+    <div class="grid-2">
+      <div class="card"><h3>Contributors per Release</h3><div class="chart" id="rel-contribs"></div></div>
+      <div class="card"><h3>Release Cadence (days)</h3><div class="chart" id="rel-cadence"></div></div>
+    </div>
+    <div class="card"><h3>Release Summary</h3><div id="rel-table"></div></div>`;
+
+  await Promise.all([
+    timeline.length ? vl('rel-timeline', {height:300, data:{values:timeline}, mark:'bar',
+      encoding:{
+        x:{field:'release',type:'nominal',sort:null,axis:{labelAngle:-45}},
+        y:{field:'commits',type:'quantitative',title:'Commits'},
+        color:{value:'#58a6ff'},
+        tooltip:[{field:'release',type:'nominal'},{field:'commits',type:'quantitative'}]
+      }}) : null,
+    contribs.length ? vl('rel-contribs', {height:300, data:{values:contribs}, mark:'bar',
+      encoding:{
+        x:{field:'release',type:'nominal',sort:null,axis:{labelAngle:-45}},
+        y:{field:'contributors',type:'quantitative',title:'Contributors'},
+        color:{value:'#e17055'},
+        tooltip:[{field:'release',type:'nominal'},{field:'contributors',type:'quantitative'}]
+      }}) : null,
+    cadence.length ? vl('rel-cadence', {height:300, data:{values:cadence}, mark:'bar',
+      encoding:{
+        x:{field:'release',type:'nominal',sort:null,axis:{labelAngle:-45}},
+        y:{field:'days',type:'quantitative',title:'Days'},
+        color:{value:'#3fb950'},
+        tooltip:[{field:'release',type:'nominal'},{field:'days',type:'quantitative',title:'Days'}]
+      }}) : null,
+  ]);
+
+  let t = '<table><thead><tr><th>Release</th><th>Date</th><th>Type</th><th class="num">Commits</th><th class="num">Contributors</th><th class="num">Insertions</th><th class="num">Deletions</th></tr></thead><tbody>';
+  for (const r of list) {
+    const date = r.date ? r.date.slice(0,10) : '';
+    const type = r.is_annotated ? '<span class="tag">annotated</span>' : 'lightweight';
+    t += `<tr class="clickable" onclick="showRelease('${ea(r.name)}')">
+      <td><strong>${h(r.name)}</strong></td><td>${date}</td><td>${type}</td>
+      <td class="num">${fmt(r.commits)}</td><td class="num">${fmt(r.contributors)}</td>
+      <td class="num plus">+${fmt(r.insertions)}</td><td class="num minus">-${fmt(r.deletions)}</td></tr>`;
+  }
+  document.getElementById('rel-table').innerHTML = t + '</tbody></table>';
+}
+
+async function showRelease(name) {
+  document.querySelectorAll('[id^="page-"]').forEach(el => el.classList.add('hidden'));
+  const el = document.getElementById('page-release-detail');
+  el.classList.remove('hidden');
+  el.innerHTML = '<p style="color:var(--text2)">Loading...</p>';
+
+  const data = await api('release/detail', {name});
+  if (!data || !data.tag) { el.innerHTML = '<p style="color:var(--text2)">Release not found.</p>'; return; }
+  const tag = data.tag, stats = data.stats;
+
+  el.innerHTML = `
+    <span class="back-link" onclick="showPage('releases')">&larr; Back to Releases</span>
+    <div class="profile-header">
+      <div class="profile-avatar">${h(tag.name.charAt(0).toUpperCase())}</div>
+      <div class="profile-info">
+        <h2>${h(tag.name)}</h2>
+        <div class="profile-email">${tag.created_at ? tag.created_at.slice(0,10) : ''} ${tag.is_annotated ? '<span class="tag">annotated</span>' : '<span class="tag" style="background:var(--border)">lightweight</span>'}</div>
+        ${tag.tagger_name ? `<div class="profile-meta"><span class="tag" style="background:var(--purple);color:#000">Tagged by ${h(tag.tagger_name)}</span></div>` : ''}
+        ${tag.annotation ? `<div style="margin-top:0.5rem;color:var(--text2);font-size:0.9rem;white-space:pre-wrap">${h(tag.annotation)}</div>` : ''}
+      </div>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="val">${fmt(stats.commits)}</div><div class="lbl">Commits</div></div>
+      <div class="stat"><div class="val">${fmt(stats.contributors)}</div><div class="lbl">Contributors</div></div>
+      <div class="stat"><div class="val plus">+${fmt(stats.insertions)}</div><div class="lbl">Insertions</div></div>
+      <div class="stat"><div class="val minus">-${fmt(stats.deletions)}</div><div class="lbl">Deletions</div></div>
+    </div>
+    <div class="grid-2">
+      <div class="card"><h3>Top Contributors</h3><div class="chart" id="reld-authors"></div></div>
+      <div class="card"><h3>Languages</h3><div class="chart" id="reld-langs"></div></div>
+    </div>
+    <div class="card"><h3>Commits</h3><div id="reld-commits"></div></div>`;
+
+  await Promise.all([
+    data.top_authors.length ? vl('reld-authors', {height:Math.max(200,data.top_authors.length*20), data:{values:data.top_authors}, mark:'bar',
+      encoding:{
+        y:{field:'name',type:'nominal',sort:'-x',title:null},
+        x:{field:'commits',type:'quantitative',title:'Commits'},
+        color:{value:'#58a6ff'},
+        tooltip:[{field:'name',type:'nominal'},{field:'commits',type:'quantitative'},{field:'email',type:'nominal'}]
+      }}) : null,
+    data.languages.length ? vl('reld-langs', {height:Math.max(200,data.languages.length*20), data:{values:data.languages}, mark:'bar',
+      encoding:{
+        y:{field:'language',type:'nominal',sort:'-x',title:null},
+        x:{field:'file_changes',type:'quantitative',title:'File Changes'},
+        color:{field:'file_changes',type:'quantitative',scale:{scheme:'tealblues'},legend:null},
+        tooltip:[{field:'language',type:'nominal'},{field:'file_changes',type:'quantitative'}]
+      }}) : null,
+  ]);
+
+  let ct = '<table><thead><tr><th>Hash</th><th>Subject</th><th>Author</th><th>Date</th><th class="num">+</th><th class="num">-</th></tr></thead><tbody>';
+  for (const c of data.commits) {
+    ct += `<tr><td class="mono">${commitLink(c.hash, c.hash.slice(0,8))}</td><td>${h(c.subject)}</td>
+      <td>${h(c.author)}</td><td>${c.date ? c.date.slice(0,10) : ''}</td>
+      <td class="num plus">+${c.insertions||0}</td><td class="num minus">-${c.deletions||0}</td></tr>`;
+  }
+  document.getElementById('reld-commits').innerHTML = ct + '</tbody></table>';
+}
+
+// ── Ownership ────────────────────────────────────────────────────────────────
+async function loadOwnership() {
+  const el = document.getElementById('page-ownership');
+  const data = await api('ownership');
+  if (!data.length) { el.innerHTML = '<div class="card"><p style="color:var(--text2)">No ownership data. Run <code>logacy blame</code> first.</p></div>'; return; }
+  el.innerHTML = `<div class="grid-2"><div class="card"><h3>Lines by Author</h3><div class="chart" id="own-author"></div></div><div class="card"><h3>Lines by Org</h3><div class="chart" id="own-org"></div></div></div><div class="card"><h3>Top Code Owners</h3><div id="own-table"></div></div>`;
+  await Promise.all([
+    vl('own-author',{height:400,data:{values:data},mark:'bar',encoding:{y:{field:'author',type:'nominal',sort:'-x',title:null},x:{field:'lines',type:'quantitative',title:'Lines'},color:{value:'#3fb950'},tooltip:[{field:'author',type:'nominal'},{field:'lines',type:'quantitative'},{field:'org',type:'nominal'}]}}),
+    vl('own-org',{height:300,data:{values:(()=>{const m={};data.forEach(d=>{m[d.org]=(m[d.org]||0)+d.lines});return Object.entries(m).map(([org,lines])=>({org,lines})).sort((a,b)=>b.lines-a.lines)})()},mark:{type:'arc',innerRadius:60},encoding:{theta:{field:'lines',type:'quantitative'},color:{field:'org',type:'nominal',title:'Org'},tooltip:[{field:'org',type:'nominal'},{field:'lines',type:'quantitative'}]}}),
+  ]);
+  const total = data.reduce((s,d)=>s+d.lines,0);
+  let t = '<table><thead><tr><th>Author</th><th>Org</th><th class="num">Lines</th><th class="num">%</th></tr></thead><tbody>';
+  for (const r of data) t += `<tr><td class="clickable" onclick="openIdentityByName('${ea(r.author)}')">${h(r.author)}</td><td>${orgTag(r.org)}</td><td class="num">${fmt(r.lines)}</td><td class="num">${(r.lines/total*100).toFixed(1)}%</td></tr>`;
+  document.getElementById('own-table').innerHTML = t + '</tbody></table>';
+}
+
+// ── Files ────────────────────────────────────────────────────────────────────
+let filesSubtab = 'file';
+async function loadFiles() {
+  const el = document.getElementById('page-files');
+
+  let html = `<div class="subtabs">
+    <button class="${filesSubtab==='file'?'active':''}" onclick="filesSubtab='file';loadFiles()">Files</button>
+    <button class="${filesSubtab==='dir'?'active':''}" onclick="filesSubtab='dir';loadFiles()">Directories</button>
+    <button class="${filesSubtab==='age'?'active':''}" onclick="filesSubtab='age';loadFiles()">Code Age</button>
+  </div>`;
+
+  if (filesSubtab === 'file') {
+    const [hotspots, largest, silos, detail] = await Promise.all([
+      api('files/hotspots'), api('files/largest').catch(()=>[]),
+      api('files/silos').catch(()=>[]), api('files/detail').catch(()=>[])
+    ]);
+
+    html += `<div class="card"><h3>File Hotspots (Most-Changed Files)</h3><div class="chart" id="f-hotspots"></div></div>`;
+
+    if (largest.length) html += `<div class="card"><h3>Largest Files (by Surviving Lines)</h3><div class="chart" id="f-largest"></div></div>`;
+
+    if (silos.length) {
+      html += `<div class="card"><h3>Knowledge Silos (Single Owner >80%)</h3>
+        <p style="color:var(--text2);font-size:0.8rem;margin-bottom:0.75rem">Files where one person owns more than 80% of lines (min 50 lines).</p>
+        <div style="max-height:50vh;overflow:auto"><table><thead><tr><th>File</th><th>Sole Owner</th><th class="num">Lines</th><th class="num">Ownership %</th><th>Language</th></tr></thead><tbody>`;
+      for (const r of silos) html += `<tr><td class="mono">${h(r.path)}</td><td class="clickable" onclick="openIdentityByName('${ea(r.owner)}')">${h(r.owner)}</td><td class="num">${fmt(r.lines)}</td><td class="num">${r.pct}%</td><td><span class="tag">${h(r.language)}</span></td></tr>`;
+      html += `</tbody></table></div></div>`;
+    }
+
+    if (detail.length) {
+      html += `<div class="card"><h3>File Ownership Detail (Top 50)</h3>
+        <div style="max-height:50vh;overflow:auto"><table><thead><tr><th>File</th><th>Primary Owner</th><th class="num">Top %</th><th class="num">Bus Factor</th><th class="num">Lines</th><th>Language</th></tr></thead><tbody>`;
+      for (const r of detail) {
+        const bfColor = r.bus_factor <= 1 ? 'var(--red)' : r.bus_factor <= 2 ? 'var(--orange)' : 'var(--green)';
+        html += `<tr><td class="mono">${h(r.path)}</td><td class="clickable" onclick="openIdentityByName('${ea(r.primary_owner)}')">${h(r.primary_owner)}</td><td class="num">${r.top_pct}%</td><td class="num" style="color:${bfColor}">${r.bus_factor}</td><td class="num">${fmt(r.lines)}</td><td><span class="tag">${h(r.language)}</span></td></tr>`;
+      }
+      html += `</tbody></table></div></div>`;
+    }
+
+    el.innerHTML = html;
+
+    const promises = [];
+    if (hotspots.length) promises.push(vl('f-hotspots',{height:Math.max(400,hotspots.length*18),data:{values:hotspots},mark:'bar',encoding:{y:{field:'path',type:'nominal',sort:'-x',title:null},x:{field:'commits',type:'quantitative',title:'Commits'},color:{field:'language',type:'nominal',title:'Language'},tooltip:[{field:'path',type:'nominal'},{field:'commits',type:'quantitative'},{field:'language',type:'nominal'}]}}));
+    if (largest.length) promises.push(vl('f-largest',{height:Math.max(400,largest.length*18),data:{values:largest},mark:'bar',encoding:{y:{field:'path',type:'nominal',sort:'-x',title:null},x:{field:'lines',type:'quantitative',title:'Lines of Code'},color:{field:'language',type:'nominal',title:'Language'},tooltip:[{field:'path',type:'nominal'},{field:'lines',type:'quantitative'},{field:'language',type:'nominal'}]}}));
+    await Promise.all(promises);
+
+  } else if (filesSubtab === 'dir') {
+    const [dirOwn, dirChurn, dirBf] = await Promise.all([
+      api('files/dir-ownership').catch(()=>[]),
+      api('files/dir-churn'),
+      api('files/dir-busfactor').catch(()=>[])
+    ]);
+
+    html += `<div class="grid-2">
+      <div class="card"><h3>Directory Ownership</h3><div class="chart" id="f-dir-own"></div></div>
+      <div class="card"><h3>Directory Churn</h3><div class="chart" id="f-dir-churn"></div></div>
+    </div>`;
+
+    if (dirBf.length) {
+      html += `<div class="card"><h3>Directory Bus Factor</h3>
+        <div style="max-height:50vh;overflow:auto"><table><thead><tr><th>Directory</th><th class="num">Total Lines</th><th class="num">Contributors</th><th>Primary Owner</th><th class="num">Top %</th></tr></thead><tbody>`;
+      for (const r of dirBf) {
+        const bfColor = r.contributors <= 1 ? 'var(--red)' : r.contributors <= 2 ? 'var(--orange)' : 'var(--green)';
+        html += `<tr><td class="mono">${h(r.directory)}</td><td class="num">${fmt(r.total_lines)}</td><td class="num" style="color:${bfColor}">${r.contributors}</td><td class="clickable" onclick="openIdentityByName('${ea(r.primary_owner)}')">${h(r.primary_owner)}</td><td class="num">${r.top_pct}%</td></tr>`;
+      }
+      html += `</tbody></table></div></div>`;
+    }
+
+    el.innerHTML = html;
+
+    const promises = [];
+    if (dirOwn.length) {
+      // Keep top 5 owners per directory, group rest as "Others"
+      const byDir = {};
+      for (const r of dirOwn) {
+        if (!byDir[r.directory]) byDir[r.directory] = [];
+        byDir[r.directory].push(r);
+      }
+      const stacked = [];
+      for (const [d, owners] of Object.entries(byDir)) {
+        for (let i = 0; i < owners.length; i++) {
+          if (i < 5) stacked.push({directory:d, author:owners[i].author, lines:owners[i].lines});
+          else if (i === 5) {
+            const others = owners.slice(5).reduce((s,o) => s + o.lines, 0);
+            stacked.push({directory:d, author:'Others', lines:others});
+            break;
+          }
+        }
+      }
+      promises.push(vl('f-dir-own',{height:Math.max(300,Object.keys(byDir).length*28),data:{values:stacked},mark:'bar',encoding:{x:{field:'directory',type:'nominal',title:'Directory',sort:'-y'},y:{field:'lines',type:'quantitative',title:'Lines',stack:'zero'},color:{field:'author',type:'nominal',title:'Author'},tooltip:[{field:'directory',type:'nominal'},{field:'author',type:'nominal'},{field:'lines',type:'quantitative'}]}}));
+    }
+    if (dirChurn.length) promises.push(vl('f-dir-churn',{height:Math.max(300,dirChurn.length*22),data:{values:dirChurn},mark:'bar',encoding:{y:{field:'directory',type:'nominal',sort:'-x',title:null},x:{field:'commits',type:'quantitative',title:'Commits'},color:{value:'#58a6ff'},tooltip:[{field:'directory',type:'nominal'},{field:'commits',type:'quantitative'}]}}));
+    await Promise.all(promises);
+
+  } else if (filesSubtab === 'age') {
+    const [age, conc] = await Promise.all([
+      api('files/age').catch(()=>[]),
+      api('files/concentration').catch(()=>[])
+    ]);
+
+    if (age.length) html += `<div class="card"><h3>Code Age Distribution (Surviving Lines by Year)</h3><div class="chart" id="f-age"></div></div>`;
+
+    if (conc.length) html += `<div class="card"><h3>Ownership Concentration</h3>
+      <p style="color:var(--text2);font-size:0.8rem;margin-bottom:0.75rem">Cumulative % of all surviving lines owned by the top N contributors. Dashed line = 80%.</p>
+      <div class="chart" id="f-conc"></div></div>`;
+
+    el.innerHTML = html;
+
+    const promises = [];
+    if (age.length) promises.push(vl('f-age',{height:300,data:{values:age},mark:{type:'bar'},encoding:{x:{field:'year',type:'ordinal',title:'Year'},y:{field:'lines',type:'quantitative',title:'Surviving Lines'},color:{field:'lines',type:'quantitative',scale:{scheme:'viridis'},legend:null},tooltip:[{field:'year',type:'ordinal'},{field:'lines',type:'quantitative'}]}}));
+
+    if (conc.length) {
+      const total = conc.reduce((s,r) => s + (r.lines||0), 0);
+      let cum = 0;
+      const cumData = [];
+      for (let i = 0; i < conc.length; i++) {
+        cum += conc[i].lines || 0;
+        const pct = total > 0 ? Math.round(cum / total * 100) : 0;
+        cumData.push({rank: i+1, author: conc[i].author, cumulative_pct: pct});
+        if (pct >= 100) break;
+      }
+      promises.push(vl('f-conc',{height:300,layer:[
+        {data:{values:cumData},layer:[
+          {mark:{type:'line',interpolate:'monotone',color:'#58a6ff'},encoding:{x:{field:'rank',type:'quantitative',title:'Top N Contributors'},y:{field:'cumulative_pct',type:'quantitative',title:'Cumulative % of Lines',scale:{domain:[0,100]}},tooltip:[{field:'rank',type:'quantitative'},{field:'author',type:'nominal'},{field:'cumulative_pct',type:'quantitative',title:'Cumulative %'}]}},
+          {mark:{type:'point',filled:true,size:30,color:'#58a6ff'},encoding:{x:{field:'rank',type:'quantitative'},y:{field:'cumulative_pct',type:'quantitative'},tooltip:[{field:'rank',type:'quantitative'},{field:'author',type:'nominal'},{field:'cumulative_pct',type:'quantitative',title:'Cumulative %'}]}}
+        ]},
+        {data:{values:[{}]},mark:{type:'rule',strokeDash:[4,4],color:'#f85149'},encoding:{y:{datum:80}}}
+      ]}));
+    }
+    await Promise.all(promises);
+  }
+}
+
+// ── Hotspots ─────────────────────────────────────────────────────────────────
+async function loadHotspots() {
+  const el = document.getElementById('page-hotspots');
+  const [fragmented, scatter, regions, sizeDist, trend, scattered, contribs] = await Promise.all([
+    api('hotspots/fragmented'), api('hotspots/scatter'),
+    api('hotspots/regions'), api('hotspots/size-distribution'),
+    api('hotspots/trend'), api('hotspots/scattered'),
+    api('hotspots/contributors')
+  ]);
+  let html = '';
+  // 1: Most-fragmented files bar chart
+  if (fragmented.length) {
+    html += `<div class="card"><h3>Most-Fragmented Files (Total Hunks)</h3><p style="color:var(--text2);font-size:0.8rem;margin-bottom:0.75rem">Files with the most diff hunks across all commits. A high hunk count means the file is frequently edited in many separate regions\u2014a sign of broad, cross-cutting changes or a file that acts as a convergence point for multiple concerns.</p><div class="chart" id="hs-fragmented"></div></div>`;
+  }
+  // 2: Scatter plot
+  if (scatter.length) {
+    html += `<div class="card"><h3>Complexity vs Churn (files with 5+ commits)</h3><p style="color:var(--text2);font-size:0.8rem;margin-bottom:0.75rem">Each bubble is a file. X-axis is how often it\u2019s changed (commits), Y-axis is how scattered each change is (avg hunks per commit), and bubble size is total lines churned. Files in the upper-right are changed often and in many places at once\u2014prime candidates for refactoring or splitting.</p><div class="chart" id="hs-scatter"></div></div>`;
+  }
+  // 3: Hunk size distribution
+  if (sizeDist.length) {
+    html += `<div class="card"><h3>Hunk Size Distribution</h3><p style="color:var(--text2);font-size:0.8rem;margin-bottom:0.75rem">How large are individual diff hunks? Mostly small hunks (1\u20135 lines) suggest surgical, focused edits. A heavy tail of large hunks (100+) may indicate bulk reformatting, generated code, or large-scale refactors.</p><div class="chart" id="hs-size-dist"></div></div>`;
+  }
+  // 4: Fragmentation trend
+  if (trend.length) {
+    html += `<div class="card"><h3>Change Fragmentation Over Time (Avg Hunks per Commit)</h3><p style="color:var(--text2);font-size:0.8rem;margin-bottom:0.75rem">Tracks the average number of diff hunks per commit over time. Rising fragmentation can signal growing code complexity\u2014each change touches more scattered locations. Drops often correlate with major refactors or cleanup efforts.</p><div class="chart" id="hs-trend"></div></div>`;
+  }
+  // 5: Most-touched line regions table
+  if (regions.length) {
+    html += `<div class="card"><h3>Most-Touched Line Regions (Top 50)</h3><p style="color:var(--text2);font-size:0.8rem;margin-bottom:0.75rem">Specific line positions that appear in diff hunks across the most commits. These are the exact code regions that get modified most frequently\u2014version strings, config blocks, hot loops, or fragile logic that keeps needing fixes.</p><div class="tbl-wrap"><table><thead><tr><th>File</th><th>Line</th><th>Span</th><th>Touches</th><th>First Touch</th><th>Last Touch</th></tr></thead><tbody>`;
+    for (const r of regions) {
+      html += `<tr><td class="mono">${h(r.file)}</td><td class="num">${r.line}</td><td class="num">${r.span}</td><td class="num">${r.touches}</td><td>${h((r.first_touch||'').slice(0,10))}</td><td>${h((r.last_touch||'').slice(0,10))}</td></tr>`;
+    }
+    html += `</tbody></table></div></div>`;
+  }
+  // 6: Most scattered changes table
+  if (scattered.length) {
+    html += `<div class="card"><h3>Most Scattered Changes (10+ commits, by Avg Hunks/Commit)</h3><p style="color:var(--text2);font-size:0.8rem;margin-bottom:0.75rem">Files where each commit touches many separate regions on average. A high avg-hunks-per-commit means the file has poor locality\u2014changes can\u2019t be contained to one area. These files are harder to review, more prone to merge conflicts, and often benefit from decomposition.</p><div class="tbl-wrap"><table><thead><tr><th>File</th><th>Commits</th><th>Total Hunks</th><th>Avg Hunks/Commit</th><th>Avg Hunk Size</th></tr></thead><tbody>`;
+    for (const r of scattered) {
+      html += `<tr><td class="mono">${h(r.file)}</td><td class="num">${fmt(r.commits)}</td><td class="num">${fmt(r.total_hunks)}</td><td class="num">${r.avg_hunks_per_commit}</td><td class="num">${r.avg_hunk_size}</td></tr>`;
+    }
+    html += `</tbody></table></div></div>`;
+  }
+  // 7: Contributor fragmentation scatter
+  if (contribs.length) {
+    html += `<div class="card"><h3>Contributor Change Dispersion</h3><p style="color:var(--text2);font-size:0.8rem;margin-bottom:0.75rem">Each bubble is a contributor (10+ commits). X-axis is commit count, Y-axis is how many separate hunks each commit touches on average. Contributors in the upper area make widely-dispersed changes across many code regions per commit. Those near the bottom make focused, localized edits. Bubble size reflects total lines churned.</p><div class="chart" id="hs-contrib-scatter"></div></div>`;
+  }
+  // 8: Contributor fragmentation table
+  if (contribs.length) {
+    const sorted = [...contribs].sort((a,b) => b.avg_hunks_per_commit - a.avg_hunks_per_commit);
+    const top = sorted.slice(0, 30);
+    const bottom = sorted.slice(-10).reverse();
+    html += `<div class="card"><h3>Most Dispersed Contributors (Top 30)</h3><p style="color:var(--text2);font-size:0.8rem;margin-bottom:0.75rem">Contributors whose commits touch the most separate code regions on average. High dispersion often correlates with cross-cutting work like API changes, refactors, or infrastructure updates that ripple across many files.</p><div class="tbl-wrap"><table><thead><tr><th>Contributor</th><th>Commits</th><th>Total Hunks</th><th>Avg Hunks/Commit</th><th>Avg Hunk Size</th><th>Total Churn</th></tr></thead><tbody>`;
+    for (const r of top) {
+      html += `<tr><td>${h(r.author)}</td><td class="num">${fmt(r.commits)}</td><td class="num">${fmt(r.total_hunks)}</td><td class="num">${r.avg_hunks_per_commit}</td><td class="num">${r.avg_hunk_size}</td><td class="num">${fmt(r.total_churn)}</td></tr>`;
+    }
+    html += `</tbody></table></div></div>`;
+    html += `<div class="card"><h3>Most Localized Contributors (Bottom 10)</h3><p style="color:var(--text2);font-size:0.8rem;margin-bottom:0.75rem">Contributors whose commits are the most focused\u2014fewest hunks per commit. These developers typically work in a narrow area of the codebase, making contained, surgical changes.</p><div class="tbl-wrap"><table><thead><tr><th>Contributor</th><th>Commits</th><th>Total Hunks</th><th>Avg Hunks/Commit</th><th>Avg Hunk Size</th><th>Total Churn</th></tr></thead><tbody>`;
+    for (const r of bottom) {
+      html += `<tr><td>${h(r.author)}</td><td class="num">${fmt(r.commits)}</td><td class="num">${fmt(r.total_hunks)}</td><td class="num">${r.avg_hunks_per_commit}</td><td class="num">${r.avg_hunk_size}</td><td class="num">${fmt(r.total_churn)}</td></tr>`;
+    }
+    html += `</tbody></table></div></div>`;
+  }
+  el.innerHTML = html;
+  const promises = [];
+  if (fragmented.length) promises.push(vl('hs-fragmented',{height:Math.max(400,fragmented.length*18),data:{values:fragmented},mark:'bar',encoding:{y:{field:'path',type:'nominal',sort:'-x',title:null},x:{field:'hunks',type:'quantitative',title:'Total Hunks'},color:{field:'avg_hunks',type:'quantitative',scale:{scheme:'orangered'},title:'Avg Hunks/Commit'},tooltip:[{field:'path',type:'nominal'},{field:'hunks',type:'quantitative',title:'Total Hunks'},{field:'commits',type:'quantitative'},{field:'avg_hunks',type:'quantitative',title:'Avg Hunks/Commit'}]}}));
+  if (scatter.length) promises.push(vl('hs-scatter',{height:400,data:{values:scatter},mark:{type:'circle',opacity:0.7},encoding:{x:{field:'commits',type:'quantitative',title:'Commits',scale:{type:'log'}},y:{field:'avg_hunks',type:'quantitative',title:'Avg Hunks per Commit'},size:{field:'total_churn',type:'quantitative',title:'Total Churn (lines)'},color:{field:'avg_hunks',type:'quantitative',scale:{scheme:'orangered'},legend:null},tooltip:[{field:'path',type:'nominal'},{field:'commits',type:'quantitative'},{field:'avg_hunks',type:'quantitative'},{field:'total_churn',type:'quantitative'}]}}));
+  if (sizeDist.length) promises.push(vl('hs-size-dist',{height:300,data:{values:sizeDist},mark:'bar',encoding:{x:{field:'size_bucket',type:'ordinal',title:'Hunk Size (lines changed)',sort:['1','2-5','6-20','21-50','51-100','100+']},y:{field:'hunks',type:'quantitative',title:'Count'},color:{value:'#bc8cff'},tooltip:[{field:'size_bucket',type:'ordinal',title:'Size'},{field:'hunks',type:'quantitative'}]}}));
+  if (trend.length) promises.push(vl('hs-trend',{height:300,data:{values:trend},mark:{type:'line',interpolate:'monotone'},encoding:{x:{field:'month',type:'temporal',title:'Month'},y:{field:'avg_hunks',type:'quantitative',title:'Avg Hunks per Commit'},tooltip:[{field:'month',type:'temporal'},{field:'avg_hunks',type:'quantitative'},{field:'total_hunks',type:'quantitative',title:'Total Hunks'}]}}));
+  if (contribs.length) promises.push(vl('hs-contrib-scatter',{height:400,data:{values:contribs},mark:{type:'circle',opacity:0.7},encoding:{x:{field:'commits',type:'quantitative',title:'Commits',scale:{type:'log'}},y:{field:'avg_hunks_per_commit',type:'quantitative',title:'Avg Hunks per Commit'},size:{field:'total_churn',type:'quantitative',title:'Total Churn (lines)'},color:{field:'avg_hunks_per_commit',type:'quantitative',scale:{scheme:'orangered'},legend:null},tooltip:[{field:'author',type:'nominal'},{field:'commits',type:'quantitative'},{field:'avg_hunks_per_commit',type:'quantitative',title:'Avg Hunks/Commit'},{field:'avg_hunk_size',type:'quantitative',title:'Avg Hunk Size'},{field:'total_churn',type:'quantitative',title:'Total Churn'}]}}));
+  await Promise.all(promises);
+}
+
+// ── Commits ──────────────────────────────────────────────────────────────────
+let commitOffset = 0;
+async function loadCommits(append) {
+  const el = document.getElementById('page-commits');
+  if (!append) { commitOffset = 0; el.innerHTML = ''; }
+  const sv = document.getElementById('commit-search')?.value || '';
+  const data = await api('commits',{limit:50,offset:commitOffset,search:sv||undefined});
+  if (!append) {
+    el.innerHTML = `<div class="toolbar" style="margin-bottom:0"><input type="text" id="commit-search" placeholder="Search commits..." value="${h(sv)}" onkeydown="if(event.key==='Enter')loadCommits()" style="width:300px"><button onclick="loadCommits()">Search</button></div><div class="card" style="margin-top:1rem"><div id="commit-table"></div></div>`;
+  }
+  const ct = document.getElementById('commit-table');
+  if (!append || !ct.querySelector('table')) {
+    ct.innerHTML = `<table><thead><tr><th>Hash</th><th>Author</th><th>Date</th><th>Subject</th><th>Ticket</th><th class="num">+</th><th class="num">-</th></tr></thead><tbody id="commit-rows"></tbody></table><div style="text-align:center;padding:1rem"><button class="btn" onclick="commitOffset+=50;loadCommits(true)" id="load-more">Load more</button></div>`;
+  }
+  const tbody = document.getElementById('commit-rows');
+  for (const r of data) tbody.insertAdjacentHTML('beforeend',`<tr><td class="hash">${commitLink(r.hash)}</td><td class="clickable" onclick="openIdentityByName('${ea(r.author||'')}')">${h(r.author||'')}</td><td>${r.author_date?.slice(0,10)||''}</td><td>${h(r.subject||'')}</td><td>${r.ticket?'<span class="tag">'+h(r.ticket)+'</span>':''}</td><td class="num plus">+${fmt(r.insertions||0)}</td><td class="num minus">-${fmt(r.deletions||0)}</td></tr>`);
+  if (data.length < 50) document.getElementById('load-more')?.remove();
+}
+
+// ── SQL Console ──────────────────────────────────────────────────────────────
+async function loadQuery() {
+  const el = document.getElementById('page-query');
+  if (el.querySelector('textarea')) return;
+  el.innerHTML = `<div class="card"><h3>SQL Console</h3><p style="color:var(--text2);font-size:0.8rem;margin-bottom:0.75rem">Read-only SELECT. Tables: commits, v_commits, identities, identity_aliases, trailers, commit_files, subsystems, v_reviews, file_ownership, blame_lines</p><textarea id="sql-input" rows="4">SELECT resolved_author_name AS author, count(*) AS commits\nFROM v_commits WHERE author_is_bot = 0\nGROUP BY author ORDER BY commits DESC LIMIT 20</textarea><div style="margin-top:0.5rem;display:flex;gap:0.5rem;align-items:center"><button class="btn" onclick="runQuery()">Run</button><span id="sql-status" style="color:var(--text2);font-size:0.8rem"></span></div><div class="results-scroll" style="margin-top:1rem" id="sql-results"></div></div>`;
+}
+async function runQuery() {
+  const sql = document.getElementById('sql-input').value;
+  const st = document.getElementById('sql-status'), res = document.getElementById('sql-results');
+  st.textContent = 'Running...'; res.innerHTML = '';
+  try {
+    const r = await fetch('/api/query?sql='+encodeURIComponent(sql));
+    if (!r.ok) { st.textContent = 'Error: '+r.status+(r.status===403?' (write queries blocked)':''); return; }
+    const d = await r.json(); st.textContent = d.count+' rows';
+    if (!d.rows.length) { res.innerHTML = '<p style="color:var(--text2)">No results</p>'; return; }
+    const cols = Object.keys(d.rows[0]);
+    let t = '<table><thead><tr>'+cols.map(c=>'<th>'+h(c)+'</th>').join('')+'</tr></thead><tbody>';
+    for (const row of d.rows) t += '<tr>'+cols.map(c=>{const v=row[c];return `<td${typeof v==='number'?' class="num"':''}>${h(v==null?'':String(v))}</td>`}).join('')+'</tr>';
+    res.innerHTML = t + '</tbody></table>';
+  } catch(e) { st.textContent = 'Error: '+e.message; }
+}
+
+// ── Utilities ────────────────────────────────────────────────────────────────
+function h(s) { return s==null?'':String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function ea(s) { return s==null?'':String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"'); }
+
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey||e.metaKey)&&e.key==='Enter'&&document.activeElement?.id==='sql-input') runQuery();
+});
+
+(async function boot() {
+  const status = await api('status');
+  ghBase = status.github_base || null;
+  if (ghBase) { const sn = ghBase.replace(/^https?:\/\//,'');
+    document.getElementById('gh-nav').innerHTML = `<a href="${ghBase}" target="_blank" rel="noopener">${sn}</a>`; }
+  showPage('overview');
+})();
+</script>
+</body>
+</html>

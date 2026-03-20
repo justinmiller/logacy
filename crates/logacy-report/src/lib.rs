@@ -53,7 +53,10 @@ pub const TEMPLATES: &[&str] = &[
     "subsystems",
     "reviews",
     "ownership",
+    "files",
     "identities",
+    "releases",
+    "hotspots",
 ];
 
 // ── DateRange ────────────────────────────────────────────────────────────────
@@ -100,6 +103,13 @@ fn sql_escape_date(s: &str) -> String {
     s.replace('\'', "")
 }
 
+/// Options that influence report rendering (e.g. issue-tracker linking).
+#[derive(Debug, Default)]
+pub struct ReportOptions {
+    /// URL template for linking tickets. Use `{ticket}` as placeholder.
+    pub ticket_url: Option<String>,
+}
+
 // ── Public API ───────────────────────────────────────────────────────────────
 
 pub fn run_report(
@@ -107,14 +117,18 @@ pub fn run_report(
     template: &str,
     output_dir: &Path,
     range: &DateRange,
+    opts: &ReportOptions,
 ) -> Result<std::path::PathBuf> {
     let (title, content) = match template {
         "overview" => report_overview(conn, range)?,
         "contributors" => report_contributors(conn, range)?,
         "subsystems" => report_subsystems(conn, range)?,
-        "reviews" => report_reviews(conn, range)?,
+        "reviews" => report_reviews(conn, range, opts)?,
         "ownership" => report_ownership(conn, range)?,
+        "files" => report_files(conn, range)?,
         "identities" => report_identities(conn, range)?,
+        "releases" => report_releases(conn, range)?,
+        "hotspots" => report_hotspots(conn, range)?,
         _ => anyhow::bail!("unknown template: {}", template),
     };
 
@@ -176,6 +190,53 @@ fn html_table_section(title: &str, headers: &[&str], rows: &[Vec<String>]) -> St
                 ""
             };
             s.push_str(&format!("<td{}>{}</td>", cls, html_escape(cell)));
+        }
+        s.push_str("</tr>");
+    }
+    s.push_str("</tbody></table></div>");
+    s
+}
+
+/// Like `html_table_section` but optionally wraps one column in hyperlinks.
+/// `link_col` is `Some((column_index, url_template))` where `{ticket}` in the
+/// template is replaced with the cell value.
+fn html_table_section_linked(
+    title: &str,
+    headers: &[&str],
+    rows: &[Vec<String>],
+    link_col: Option<(usize, &str)>,
+) -> String {
+    let mut s = format!(
+        r#"<div class="chart-section"><h2>{}</h2><table><thead><tr>"#,
+        html_escape(title)
+    );
+    for h in headers {
+        s.push_str(&format!("<th>{}</th>", html_escape(h)));
+    }
+    s.push_str("</tr></thead><tbody>");
+    for row in rows {
+        s.push_str("<tr>");
+        for (i, cell) in row.iter().enumerate() {
+            let cls = if i > 0
+                && cell
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == '.' || c == '-' || c == ',')
+            {
+                " class=\"number\""
+            } else {
+                ""
+            };
+            let content = if link_col.is_some_and(|(col, _)| col == i) && !cell.is_empty() {
+                let url = link_col.unwrap().1.replace("{ticket}", cell);
+                format!(
+                    r#"<a href="{}" target="_blank" rel="noopener">{}</a>"#,
+                    html_escape(&url),
+                    html_escape(cell)
+                )
+            } else {
+                html_escape(cell)
+            };
+            s.push_str(&format!("<td{}>{}</td>", cls, content));
         }
         s.push_str("</tr>");
     }
@@ -520,7 +581,7 @@ fn report_contributors(conn: &Connection, dr: &DateRange) -> Result<(String, Str
         &format!(
             "SELECT
                 i.canonical_name AS name,
-                COALESCE(i.org, '') AS org,
+                COALESCE(vio.org, '') AS org,
                 count(DISTINCT c.hash) AS commits,
                 COALESCE(reviews.review_count, 0) AS reviews,
                 COALESCE(subs.subsystem_count, 0) AS subsystems,
@@ -528,6 +589,7 @@ fn report_contributors(conn: &Connection, dr: &DateRange) -> Result<(String, Str
                 max(c.author_date) AS last_commit,
                 CAST(julianday(max(c.author_date)) - julianday(min(c.author_date)) AS INTEGER) AS tenure_days
              FROM identities i
+             LEFT JOIN v_identity_org vio ON vio.identity_id = i.id
              JOIN commits c ON c.author_id = i.id
              LEFT JOIN (
                  SELECT t.identity_id, count(*) AS review_count
@@ -949,7 +1011,7 @@ fn report_subsystems(conn: &Connection, dr: &DateRange) -> Result<(String, Strin
 
 // ── Report: Reviews ──────────────────────────────────────────────────────────
 
-fn report_reviews(conn: &Connection, dr: &DateRange) -> Result<(String, String)> {
+fn report_reviews(conn: &Connection, dr: &DateRange, opts: &ReportOptions) -> Result<(String, String)> {
     let mut content = String::new();
     let df = dr.sql("author_date");
 
@@ -1042,10 +1104,13 @@ fn report_reviews(conn: &Connection, dr: &DateRange) -> Result<(String, String)>
     )?;
     if !rows.is_empty() {
         let header_refs: Vec<&str> = headers.iter().map(|s| s.as_str()).collect();
-        content.push_str(&html_table_section(
+        // Link ticket column (index 0) to issue tracker if configured
+        let link_col = opts.ticket_url.as_ref().map(|tmpl| (0usize, tmpl.as_str()));
+        content.push_str(&html_table_section_linked(
             "Longest Review Latency (author\u{2192}commit date gap)",
             &header_refs,
             &rows,
+            link_col,
         ));
     }
 
@@ -1146,9 +1211,10 @@ fn report_ownership(conn: &Connection, dr: &DateRange) -> Result<(String, String
     // Lines owned by org
     let data = query_json_array(
         conn,
-        "SELECT COALESCE(i.org, 'Unknown') AS org, SUM(fo.lines_owned) AS lines
+        "SELECT COALESCE(vio.org, 'Unknown') AS org, SUM(fo.lines_owned) AS lines
          FROM file_ownership fo
          JOIN identities i ON fo.identity_id = i.id
+         LEFT JOIN v_identity_org vio ON vio.identity_id = i.id
          WHERE fo.snapshot_id = ?1 AND i.is_bot = 0
          GROUP BY org ORDER BY lines DESC",
         &[&snapshot_id],
@@ -1215,10 +1281,10 @@ fn report_ownership(conn: &Connection, dr: &DateRange) -> Result<(String, String
     let data = query_json_array(
         conn,
         &format!(
-            "SELECT strftime('%Y', c.author_date) AS year, count(*) AS lines
-             FROM blame_lines bl
-             JOIN commits c ON c.hash = bl.orig_commit
-             WHERE bl.snapshot_id = ?1{age_df}
+            "SELECT strftime('%Y', c.author_date) AS year, sum(bh.line_count) AS lines
+             FROM blame_hunks bh
+             JOIN commits c ON c.hash = bh.orig_commit
+             WHERE bh.snapshot_id = ?1{age_df}
              GROUP BY year ORDER BY year"
         ),
         &[&snapshot_id],
@@ -1250,6 +1316,408 @@ fn report_ownership(conn: &Connection, dr: &DateRange) -> Result<(String, String
     Ok(("Ownership".to_string(), content))
 }
 
+// ── Report: Files ────────────────────────────────────────────────────────────
+
+fn dir_expr(col: &str) -> String {
+    format!(
+        "CASE WHEN instr({col}, '/') > 0 THEN substr({col}, 1, instr({col}, '/') - 1) ELSE '(root)' END"
+    )
+}
+
+fn report_files(conn: &Connection, dr: &DateRange) -> Result<(String, String)> {
+    let mut content = String::new();
+
+    // Get latest snapshot
+    let snapshot_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM blame_snapshots ORDER BY id DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+
+    let snapshot_id = match snapshot_id {
+        Some(id) => id,
+        None => {
+            return Ok((
+                "Files".to_string(),
+                "<div class=\"chart-section\"><h2>No blame snapshots</h2>\
+                 <p>Run <code>logacy blame</code> first.</p></div>"
+                    .to_string(),
+            ));
+        }
+    };
+
+    // ── LINE-LEVEL ──
+
+    // Section 1: Code Age Distribution
+    let age_df = dr.sql("c.author_date");
+    let data = query_json_array(
+        conn,
+        &format!(
+            "SELECT strftime('%Y', c.author_date) AS year, sum(bh.line_count) AS lines
+             FROM blame_hunks bh
+             JOIN commits c ON c.hash = bh.orig_commit
+             WHERE bh.snapshot_id = ?1{age_df}
+             GROUP BY year ORDER BY year"
+        ),
+        &[&snapshot_id],
+    )?;
+    if !data.is_empty() {
+        let spec = json!({
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "width": "container", "height": 300,
+            "data": {"values": data},
+            "mark": {"type": "bar"},
+            "encoding": {
+                "x": {"field": "year", "type": "ordinal", "title": "Year"},
+                "y": {"field": "lines", "type": "quantitative", "title": "Surviving Lines"},
+                "color": {"field": "lines", "type": "quantitative",
+                          "scale": {"scheme": "viridis"}, "legend": null},
+                "tooltip": [
+                    {"field": "year", "type": "ordinal"},
+                    {"field": "lines", "type": "quantitative"}
+                ]
+            }
+        });
+        content.push_str(&vegalite_div(
+            "code-age",
+            "Code Age Distribution (Surviving Lines by Year)",
+            &spec,
+        ));
+    }
+
+    // Section 2: Ownership Concentration (cumulative % of lines by top N contributors)
+    let rows = query_json_array(
+        conn,
+        "SELECT i.canonical_name AS author, SUM(fo.lines_owned) AS lines
+         FROM file_ownership fo
+         JOIN identities i ON fo.identity_id = i.id
+         WHERE fo.snapshot_id = ?1 AND i.is_bot = 0
+         GROUP BY i.id ORDER BY lines DESC",
+        &[&snapshot_id],
+    )?;
+    if !rows.is_empty() {
+        let total: f64 = rows
+            .iter()
+            .filter_map(|r| r.get("lines").and_then(|v| v.as_f64()))
+            .sum();
+        let mut cumulative = 0.0;
+        let mut cum_data: Vec<Value> = Vec::new();
+        for (i, row) in rows.iter().enumerate() {
+            let lines = row.get("lines").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            cumulative += lines;
+            let pct = if total > 0.0 {
+                (cumulative / total * 100.0).round()
+            } else {
+                0.0
+            };
+            cum_data.push(json!({
+                "rank": i + 1,
+                "author": row.get("author").and_then(|v| v.as_str()).unwrap_or(""),
+                "cumulative_pct": pct
+            }));
+            if pct >= 100.0 {
+                break;
+            }
+        }
+        let spec = json!({
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "width": "container", "height": 300,
+            "layer": [
+                {
+                    "data": {"values": cum_data},
+                    "layer": [
+                        {
+                            "mark": {"type": "line", "interpolate": "monotone"},
+                            "encoding": {
+                                "x": {"field": "rank", "type": "quantitative", "title": "Top N Contributors"},
+                                "y": {"field": "cumulative_pct", "type": "quantitative", "title": "Cumulative % of Lines", "scale": {"domain": [0, 100]}},
+                                "tooltip": [
+                                    {"field": "rank", "type": "quantitative"},
+                                    {"field": "author", "type": "nominal"},
+                                    {"field": "cumulative_pct", "type": "quantitative", "title": "Cumulative %"}
+                                ]
+                            }
+                        },
+                        {
+                            "mark": {"type": "point", "filled": true, "size": 30},
+                            "encoding": {
+                                "x": {"field": "rank", "type": "quantitative"},
+                                "y": {"field": "cumulative_pct", "type": "quantitative"},
+                                "tooltip": [
+                                    {"field": "rank", "type": "quantitative"},
+                                    {"field": "author", "type": "nominal"},
+                                    {"field": "cumulative_pct", "type": "quantitative", "title": "Cumulative %"}
+                                ]
+                            }
+                        }
+                    ]
+                },
+                {
+                    "data": {"values": [{}]},
+                    "mark": {"type": "rule", "strokeDash": [4, 4], "color": "#e45756"},
+                    "encoding": {
+                        "y": {"datum": 80}
+                    }
+                }
+            ]
+        });
+        content.push_str(&vegalite_div(
+            "ownership-concentration",
+            "Ownership Concentration (Cumulative Line Ownership)",
+            &spec,
+        ));
+    }
+
+    // ── FILE-LEVEL ──
+
+    // Section 3: File Hotspots (top 30 most-changed files)
+    let df = dr.sql("c.author_date");
+    let data = query_json_array(
+        conn,
+        &format!(
+            "SELECT cf.path, COALESCE(cf.language, '') AS language, count(*) AS commits
+             FROM commit_files cf
+             JOIN commits c ON c.hash = cf.commit_hash AND c.first_parent = 1
+             WHERE 1=1{df}
+             GROUP BY cf.path ORDER BY commits DESC LIMIT 30"
+        ),
+        &[],
+    )?;
+    if !data.is_empty() {
+        let spec = json!({
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "width": "container", "height": 500,
+            "data": {"values": data},
+            "mark": "bar",
+            "encoding": {
+                "y": {"field": "path", "type": "nominal", "sort": "-x", "title": null},
+                "x": {"field": "commits", "type": "quantitative", "title": "Commits"},
+                "color": {"field": "language", "type": "nominal", "title": "Language"},
+                "tooltip": [
+                    {"field": "path", "type": "nominal"},
+                    {"field": "commits", "type": "quantitative"},
+                    {"field": "language", "type": "nominal"}
+                ]
+            }
+        });
+        content.push_str(&vegalite_div("file-hotspots", "File Hotspots (Most-Changed Files)", &spec));
+    }
+
+    // Section 4: Largest Files (top 30 by surviving lines)
+    let data = query_json_array(
+        conn,
+        "SELECT fo.path, SUM(fo.lines_owned) AS lines,
+                COALESCE((SELECT cf.language FROM commit_files cf WHERE cf.path = fo.path ORDER BY cf.rowid DESC LIMIT 1), '') AS language
+         FROM file_ownership fo
+         WHERE fo.snapshot_id = ?1
+         GROUP BY fo.path ORDER BY lines DESC LIMIT 30",
+        &[&snapshot_id],
+    )?;
+    if !data.is_empty() {
+        let spec = json!({
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "width": "container", "height": 500,
+            "data": {"values": data},
+            "mark": "bar",
+            "encoding": {
+                "y": {"field": "path", "type": "nominal", "sort": "-x", "title": null},
+                "x": {"field": "lines", "type": "quantitative", "title": "Lines of Code"},
+                "color": {"field": "language", "type": "nominal", "title": "Language"},
+                "tooltip": [
+                    {"field": "path", "type": "nominal"},
+                    {"field": "lines", "type": "quantitative"},
+                    {"field": "language", "type": "nominal"}
+                ]
+            }
+        });
+        content.push_str(&vegalite_div("largest-files", "Largest Files (by Surviving Lines)", &spec));
+    }
+
+    // Section 5: Knowledge Silos (files where one person owns >80%)
+    let (headers, rows) = query_table(
+        conn,
+        "SELECT fo.path AS File,
+                i.canonical_name AS \"Sole Owner\",
+                fo.lines_owned AS Lines,
+                ROUND(fo.fraction * 100, 1) AS \"Ownership %\",
+                COALESCE((SELECT cf.language FROM commit_files cf WHERE cf.path = fo.path ORDER BY cf.rowid DESC LIMIT 1), '') AS Language
+         FROM file_ownership fo
+         JOIN identities i ON fo.identity_id = i.id
+         WHERE fo.snapshot_id = ?1 AND fo.fraction > 0.8 AND fo.lines_owned >= 50
+         ORDER BY fo.lines_owned DESC LIMIT 50",
+        &[&snapshot_id],
+    )?;
+    if !rows.is_empty() {
+        let header_refs: Vec<&str> = headers.iter().map(|s| s.as_str()).collect();
+        content.push_str(&html_table_section(
+            "Knowledge Silos (Single Owner >80%)",
+            &header_refs,
+            &rows,
+        ));
+    }
+
+    // Section 6: File Ownership Detail Table
+    let (headers, rows) = query_table(
+        conn,
+        "SELECT fo.path AS File,
+                (SELECT i2.canonical_name FROM file_ownership fo2
+                 JOIN identities i2 ON fo2.identity_id = i2.id
+                 WHERE fo2.snapshot_id = fo.snapshot_id AND fo2.path = fo.path
+                 ORDER BY fo2.lines_owned DESC LIMIT 1) AS \"Primary Owner\",
+                ROUND((SELECT MAX(fo2.fraction) FROM file_ownership fo2
+                 WHERE fo2.snapshot_id = fo.snapshot_id AND fo2.path = fo.path) * 100, 1) AS \"Top %\",
+                (SELECT count(*) FROM file_ownership fo2
+                 WHERE fo2.snapshot_id = fo.snapshot_id AND fo2.path = fo.path
+                   AND fo2.fraction >= 0.05) AS \"Bus Factor\",
+                SUM(fo.lines_owned) AS Lines,
+                COALESCE((SELECT cf.language FROM commit_files cf WHERE cf.path = fo.path ORDER BY cf.rowid DESC LIMIT 1), '') AS Language
+         FROM file_ownership fo
+         WHERE fo.snapshot_id = ?1
+         GROUP BY fo.path
+         ORDER BY Lines DESC LIMIT 50",
+        &[&snapshot_id],
+    )?;
+    if !rows.is_empty() {
+        let header_refs: Vec<&str> = headers.iter().map(|s| s.as_str()).collect();
+        content.push_str(&html_table_section(
+            "File Ownership Detail (Top 50 Files)",
+            &header_refs,
+            &rows,
+        ));
+    }
+
+    // ── DIRECTORY-LEVEL ──
+
+    let dir = dir_expr("fo.path");
+
+    // Section 7: Directory Ownership (stacked bar)
+    let dir_owners = query_json_array(
+        conn,
+        &format!(
+            "SELECT {dir} AS directory, i.canonical_name AS author, SUM(fo.lines_owned) AS lines
+             FROM file_ownership fo
+             JOIN identities i ON fo.identity_id = i.id
+             WHERE fo.snapshot_id = ?1 AND i.is_bot = 0
+             GROUP BY directory, i.id ORDER BY directory, lines DESC"
+        ),
+        &[&snapshot_id],
+    )?;
+    if !dir_owners.is_empty() {
+        // Keep top 5 owners per directory, group rest as "Others"
+        let mut by_dir: std::collections::HashMap<String, Vec<(String, f64)>> =
+            std::collections::HashMap::new();
+        for row in &dir_owners {
+            let d = row.get("directory").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let a = row.get("author").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let l = row.get("lines").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            by_dir.entry(d).or_default().push((a, l));
+        }
+        let mut stacked_data: Vec<Value> = Vec::new();
+        for (d, owners) in &by_dir {
+            for (i, (author, lines)) in owners.iter().enumerate() {
+                if i < 5 {
+                    stacked_data.push(json!({"directory": d, "author": author, "lines": lines}));
+                } else if i == 5 {
+                    let others: f64 = owners[5..].iter().map(|(_, l)| l).sum();
+                    stacked_data.push(json!({"directory": d, "author": "Others", "lines": others}));
+                    break;
+                }
+            }
+        }
+        let spec = json!({
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "width": "container", "height": 400,
+            "data": {"values": stacked_data},
+            "mark": "bar",
+            "encoding": {
+                "x": {"field": "directory", "type": "nominal", "title": "Directory", "sort": "-y"},
+                "y": {"field": "lines", "type": "quantitative", "title": "Lines", "stack": "zero"},
+                "color": {"field": "author", "type": "nominal", "title": "Author"},
+                "tooltip": [
+                    {"field": "directory", "type": "nominal"},
+                    {"field": "author", "type": "nominal"},
+                    {"field": "lines", "type": "quantitative"}
+                ]
+            }
+        });
+        content.push_str(&vegalite_div("dir-ownership", "Directory Ownership", &spec));
+    }
+
+    // Section 8: Directory Churn
+    let dir_cf = dir_expr("cf.path");
+    let data = query_json_array(
+        conn,
+        &format!(
+            "SELECT {dir_cf} AS directory, count(*) AS commits
+             FROM commit_files cf
+             JOIN commits c ON c.hash = cf.commit_hash AND c.first_parent = 1
+             WHERE 1=1{df}
+             GROUP BY directory ORDER BY commits DESC"
+        ),
+        &[],
+    )?;
+    if !data.is_empty() {
+        let spec = json!({
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "width": "container", "height": 400,
+            "data": {"values": data},
+            "mark": "bar",
+            "encoding": {
+                "y": {"field": "directory", "type": "nominal", "sort": "-x", "title": null},
+                "x": {"field": "commits", "type": "quantitative", "title": "Commits"},
+                "color": {"value": "#4c72b0"},
+                "tooltip": [
+                    {"field": "directory", "type": "nominal"},
+                    {"field": "commits", "type": "quantitative"}
+                ]
+            }
+        });
+        content.push_str(&vegalite_div("dir-churn", "Directory Churn", &spec));
+    }
+
+    // Section 9: Directory Bus Factor
+    let (headers, rows) = query_table(
+        conn,
+        &format!(
+            "WITH dir_stats AS (
+                SELECT {dir} AS directory,
+                       SUM(fo.lines_owned) AS total_lines,
+                       COUNT(DISTINCT fo.identity_id) AS contributors,
+                       fo.identity_id,
+                       i.canonical_name,
+                       SUM(fo.lines_owned) AS author_lines
+                FROM file_ownership fo
+                JOIN identities i ON fo.identity_id = i.id
+                WHERE fo.snapshot_id = ?1 AND i.is_bot = 0
+                GROUP BY directory, fo.identity_id
+            )
+            SELECT ds.directory AS Directory,
+                   SUM(ds.author_lines) AS \"Total Lines\",
+                   COUNT(DISTINCT ds.identity_id) AS Contributors,
+                   (SELECT ds2.canonical_name FROM dir_stats ds2
+                    WHERE ds2.directory = ds.directory
+                    ORDER BY ds2.author_lines DESC LIMIT 1) AS \"Primary Owner\",
+                   ROUND(MAX(ds.author_lines) * 100.0 / SUM(ds.author_lines), 1) AS \"Top %\"
+            FROM dir_stats ds
+            GROUP BY ds.directory
+            ORDER BY \"Total Lines\" DESC"
+        ),
+        &[&snapshot_id],
+    )?;
+    if !rows.is_empty() {
+        let header_refs: Vec<&str> = headers.iter().map(|s| s.as_str()).collect();
+        content.push_str(&html_table_section(
+            "Directory Bus Factor",
+            &header_refs,
+            &rows,
+        ));
+    }
+
+    Ok(("Files".to_string(), content))
+}
+
 // ── Report: Identities ──────────────────────────────────────────────────────
 
 fn report_identities(conn: &Connection, dr: &DateRange) -> Result<(String, String)> {
@@ -1263,7 +1731,7 @@ fn report_identities(conn: &Connection, dr: &DateRange) -> Result<(String, Strin
             (SELECT count(*) FROM identity_aliases) AS raw_aliases,
             (SELECT count(*) FROM identities) AS identities,
             (SELECT count(*) FROM identities WHERE is_bot = 1) AS bots,
-            (SELECT count(*) FROM identities WHERE org IS NOT NULL) AS with_org,
+            (SELECT count(DISTINCT identity_id) FROM identity_affiliations) AS with_org,
             (SELECT count(*) FROM trailers t
              WHERE t.key IN ('Signed-off-by','Reviewed-by','Tested-by','Acked-by')
                AND t.identity_id IS NOT NULL) AS resolved_trailers,
@@ -1287,13 +1755,14 @@ fn report_identities(conn: &Connection, dr: &DateRange) -> Result<(String, Strin
             "SELECT
                 i.canonical_name AS name,
                 i.canonical_email AS email,
-                COALESCE(i.org, '') AS org,
+                COALESCE(vio.org, '') AS org,
                 CASE WHEN i.is_bot = 1 THEN 'yes' ELSE '' END AS bot,
                 aliases.alias_count AS aliases,
                 aliases.emails AS alias_emails,
                 COALESCE(commits.cnt, 0) AS commits,
                 COALESCE(reviews.cnt, 0) AS reviews
              FROM identities i
+             LEFT JOIN v_identity_org vio ON vio.identity_id = i.id
              LEFT JOIN (
                  SELECT ia.identity_id,
                         count(*) AS alias_count,
@@ -1365,8 +1834,9 @@ fn report_identities(conn: &Connection, dr: &DateRange) -> Result<(String, Strin
     // Org distribution — identities per org
     let data = query_json_array(
         conn,
-        "SELECT COALESCE(i.org, 'Unaffiliated') AS org, count(*) AS identities
+        "SELECT COALESCE(vio.org, 'Unaffiliated') AS org, count(*) AS identities
          FROM identities i
+         LEFT JOIN v_identity_org vio ON vio.identity_id = i.id
          WHERE i.is_bot = 0
          GROUP BY org ORDER BY identities DESC",
         &[],
@@ -1441,10 +1911,11 @@ fn report_identities(conn: &Connection, dr: &DateRange) -> Result<(String, Strin
     let (headers, rows) = query_table(
         conn,
         "SELECT i.canonical_name AS name, i.canonical_email AS email,
-                COALESCE(i.org, '') AS org,
+                COALESCE(vio.org, '') AS org,
                 count(ia.email) AS alias_count,
                 GROUP_CONCAT(ia.email, ', ') AS all_emails
          FROM identities i
+         LEFT JOIN v_identity_org vio ON vio.identity_id = i.id
          JOIN identity_aliases ia ON ia.identity_id = i.id
          WHERE i.is_bot = 0
          GROUP BY i.id
@@ -1463,4 +1934,384 @@ fn report_identities(conn: &Connection, dr: &DateRange) -> Result<(String, Strin
     }
 
     Ok(("Identities".to_string(), content))
+}
+
+fn report_releases(conn: &Connection, dr: &DateRange) -> Result<(String, String)> {
+    let mut content = String::new();
+    let df = dr.sql("cr.release_date");
+
+    // Check if we have any release data
+    let release_count: i64 = conn.query_row("SELECT count(*) FROM tags", [], |r| r.get(0))?;
+    if release_count == 0 {
+        content.push_str(r#"<div class="chart-section"><h2>No Release Data</h2><p>No tags found. Run <code>logacy index</code> on a repository with tags.</p></div>"#);
+        return Ok(("Releases".to_string(), content));
+    }
+
+    // Release summary table
+    let (headers, rows) = query_table(
+        conn,
+        &format!(
+            "SELECT t.name AS release,
+                    substr(t.created_at, 1, 10) AS date,
+                    count(DISTINCT cr.commit_hash) AS commits,
+                    count(DISTINCT c.author_email) AS contributors,
+                    COALESCE(sum(c.insertions), 0) AS insertions,
+                    COALESCE(sum(c.deletions), 0) AS deletions,
+                    CASE WHEN t.is_annotated THEN 'yes' ELSE 'no' END AS annotated
+             FROM tags t
+             LEFT JOIN commit_releases cr ON cr.release_tag = t.name
+             LEFT JOIN commits c ON c.hash = cr.commit_hash
+             WHERE 1=1 {}
+             GROUP BY t.name
+             ORDER BY t.created_at DESC
+             LIMIT 50",
+            df
+        ),
+        &[],
+    )?;
+    if !rows.is_empty() {
+        let header_refs: Vec<&str> = headers.iter().map(|s| s.as_str()).collect();
+        content.push_str(&html_table_section("Release Summary", &header_refs, &rows));
+    }
+
+    // Commits per release (bar chart)
+    let data = query_json_array(
+        conn,
+        &format!(
+            "SELECT t.name AS release, count(cr.commit_hash) AS commits
+             FROM tags t
+             LEFT JOIN commit_releases cr ON cr.release_tag = t.name
+             WHERE 1=1 {}
+             GROUP BY t.name
+             HAVING commits > 0
+             ORDER BY t.created_at ASC",
+            df
+        ),
+        &[],
+    )?;
+    if !data.is_empty() {
+        let spec = json!({
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "width": "container",
+            "height": 300,
+            "data": {"values": data},
+            "mark": "bar",
+            "encoding": {
+                "x": {"field": "release", "type": "nominal", "sort": null,
+                       "axis": {"labelAngle": -45}},
+                "y": {"field": "commits", "type": "quantitative", "title": "Commits"},
+                "tooltip": [
+                    {"field": "release", "type": "nominal"},
+                    {"field": "commits", "type": "quantitative"}
+                ]
+            }
+        });
+        content.push_str(&vegalite_div("commits-per-release", "Commits per Release", &spec));
+    }
+
+    // Contributors per release (bar chart)
+    let data = query_json_array(
+        conn,
+        &format!(
+            "SELECT t.name AS release, count(DISTINCT c.author_email) AS contributors
+             FROM tags t
+             JOIN commit_releases cr ON cr.release_tag = t.name
+             JOIN commits c ON c.hash = cr.commit_hash
+             WHERE 1=1 {}
+             GROUP BY t.name
+             ORDER BY t.created_at ASC",
+            df
+        ),
+        &[],
+    )?;
+    if !data.is_empty() {
+        let spec = json!({
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "width": "container",
+            "height": 300,
+            "data": {"values": data},
+            "mark": "bar",
+            "encoding": {
+                "x": {"field": "release", "type": "nominal", "sort": null,
+                       "axis": {"labelAngle": -45}},
+                "y": {"field": "contributors", "type": "quantitative", "title": "Contributors"},
+                "color": {"value": "#e17055"},
+                "tooltip": [
+                    {"field": "release", "type": "nominal"},
+                    {"field": "contributors", "type": "quantitative"}
+                ]
+            }
+        });
+        content.push_str(&vegalite_div(
+            "contributors-per-release",
+            "Contributors per Release",
+            &spec,
+        ));
+    }
+
+    // Release cadence — days between consecutive releases (bar chart)
+    let data = query_json_array(
+        conn,
+        "SELECT name AS release,
+                CAST(julianday(created_at) - julianday(lag(created_at) OVER (ORDER BY created_at)) AS INTEGER) AS days
+         FROM tags
+         ORDER BY created_at ASC",
+        &[],
+    )?;
+    // Filter out the first entry (NULL days) and any negative values
+    let cadence_data: Vec<_> = data
+        .into_iter()
+        .filter(|v| {
+            v.get("days")
+                .and_then(|d| d.as_i64())
+                .map(|d| d > 0)
+                .unwrap_or(false)
+        })
+        .collect();
+    if !cadence_data.is_empty() {
+        let spec = json!({
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "width": "container",
+            "height": 300,
+            "data": {"values": cadence_data},
+            "mark": "bar",
+            "encoding": {
+                "x": {"field": "release", "type": "nominal", "sort": null,
+                       "axis": {"labelAngle": -45}},
+                "y": {"field": "days", "type": "quantitative", "title": "Days Since Previous Release"},
+                "color": {"value": "#00b894"},
+                "tooltip": [
+                    {"field": "release", "type": "nominal"},
+                    {"field": "days", "type": "quantitative", "title": "Days"}
+                ]
+            }
+        });
+        content.push_str(&vegalite_div("release-cadence", "Release Cadence", &spec));
+    }
+
+    Ok(("Releases".to_string(), content))
+}
+
+// ── Report: Hotspots ────────────────────────────────────────────────────────
+
+fn report_hotspots(conn: &Connection, dr: &DateRange) -> Result<(String, String)> {
+    let mut content = String::new();
+    let df = dr.sql("c.author_date");
+
+    // Section 1: Files by total hunk count (most-fragmented changes)
+    let data = query_json_array(
+        conn,
+        &format!(
+            "SELECT ch.path, count(*) AS hunks, count(DISTINCT ch.commit_hash) AS commits,
+                    round(count(*) * 1.0 / count(DISTINCT ch.commit_hash), 1) AS avg_hunks
+             FROM commit_hunks ch
+             JOIN commits c ON c.hash = ch.commit_hash AND c.first_parent = 1
+             WHERE 1=1{df}
+             GROUP BY ch.path ORDER BY hunks DESC LIMIT 30"
+        ),
+        &[],
+    )?;
+    if !data.is_empty() {
+        let spec = json!({
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "width": "container", "height": 500,
+            "data": {"values": data},
+            "mark": "bar",
+            "encoding": {
+                "y": {"field": "path", "type": "nominal", "sort": "-x", "title": null},
+                "x": {"field": "hunks", "type": "quantitative", "title": "Total Hunks"},
+                "color": {"field": "avg_hunks", "type": "quantitative",
+                          "scale": {"scheme": "orangered"}, "title": "Avg Hunks/Commit"},
+                "tooltip": [
+                    {"field": "path", "type": "nominal"},
+                    {"field": "hunks", "type": "quantitative", "title": "Total Hunks"},
+                    {"field": "commits", "type": "quantitative"},
+                    {"field": "avg_hunks", "type": "quantitative", "title": "Avg Hunks/Commit"}
+                ]
+            }
+        });
+        content.push_str(&vegalite_div(
+            "hunk-hotspots",
+            "Most-Fragmented Files (Total Hunks)",
+            &spec,
+        ));
+    }
+
+    // Section 2: Hunk scatter — complexity vs churn
+    let scatter = query_json_array(
+        conn,
+        &format!(
+            "SELECT ch.path,
+                    count(DISTINCT ch.commit_hash) AS commits,
+                    round(count(*) * 1.0 / count(DISTINCT ch.commit_hash), 1) AS avg_hunks,
+                    sum(ch.new_lines + ch.old_lines) AS total_churn
+             FROM commit_hunks ch
+             JOIN commits c ON c.hash = ch.commit_hash AND c.first_parent = 1
+             WHERE 1=1{df}
+             GROUP BY ch.path
+             HAVING commits >= 5
+             ORDER BY total_churn DESC LIMIT 200"
+        ),
+        &[],
+    )?;
+    if !scatter.is_empty() {
+        let spec = json!({
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "width": "container", "height": 400,
+            "data": {"values": scatter},
+            "mark": {"type": "circle", "opacity": 0.7},
+            "encoding": {
+                "x": {"field": "commits", "type": "quantitative", "title": "Commits", "scale": {"type": "log"}},
+                "y": {"field": "avg_hunks", "type": "quantitative", "title": "Avg Hunks per Commit"},
+                "size": {"field": "total_churn", "type": "quantitative", "title": "Total Churn (lines)"},
+                "color": {"field": "avg_hunks", "type": "quantitative",
+                          "scale": {"scheme": "orangered"}, "legend": null},
+                "tooltip": [
+                    {"field": "path", "type": "nominal"},
+                    {"field": "commits", "type": "quantitative"},
+                    {"field": "avg_hunks", "type": "quantitative"},
+                    {"field": "total_churn", "type": "quantitative"}
+                ]
+            }
+        });
+        content.push_str(&vegalite_div(
+            "hunk-scatter",
+            "Complexity vs Churn (files with 5+ commits)",
+            &spec,
+        ));
+    }
+
+    // Section 3: Most-touched line regions across all files
+    let (headers, rows) = query_table(
+        conn,
+        &format!(
+            "SELECT ch.path AS File,
+                    ch.new_start AS Line,
+                    ch.new_lines AS Span,
+                    count(DISTINCT ch.commit_hash) AS Touches,
+                    min(c.author_date) AS \"First Touch\",
+                    max(c.author_date) AS \"Last Touch\"
+             FROM commit_hunks ch
+             JOIN commits c ON c.hash = ch.commit_hash AND c.first_parent = 1
+             WHERE ch.new_lines > 0{df}
+             GROUP BY ch.path, ch.new_start
+             ORDER BY Touches DESC LIMIT 50"
+        ),
+        &[],
+    )?;
+    if !rows.is_empty() {
+        let header_refs: Vec<&str> = headers.iter().map(|s| s.as_str()).collect();
+        content.push_str(&html_table_section(
+            "Most-Touched Line Regions (Top 50)",
+            &header_refs,
+            &rows,
+        ));
+    }
+
+    // Section 4: Hunk size distribution
+    let data = query_json_array(
+        conn,
+        &format!(
+            "SELECT CASE
+                      WHEN new_lines + old_lines <= 1 THEN '1'
+                      WHEN new_lines + old_lines <= 5 THEN '2-5'
+                      WHEN new_lines + old_lines <= 20 THEN '6-20'
+                      WHEN new_lines + old_lines <= 50 THEN '21-50'
+                      WHEN new_lines + old_lines <= 100 THEN '51-100'
+                      ELSE '100+'
+                    END AS size_bucket,
+                    count(*) AS hunks
+             FROM commit_hunks ch
+             JOIN commits c ON c.hash = ch.commit_hash AND c.first_parent = 1
+             WHERE 1=1{df}
+             GROUP BY size_bucket
+             ORDER BY min(new_lines + old_lines)"
+        ),
+        &[],
+    )?;
+    if !data.is_empty() {
+        let spec = json!({
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "width": "container", "height": 300,
+            "data": {"values": data},
+            "mark": "bar",
+            "encoding": {
+                "x": {"field": "size_bucket", "type": "ordinal", "title": "Hunk Size (lines changed)",
+                       "sort": ["1", "2-5", "6-20", "21-50", "51-100", "100+"]},
+                "y": {"field": "hunks", "type": "quantitative", "title": "Count"},
+                "color": {"value": "#6c5ce7"},
+                "tooltip": [
+                    {"field": "size_bucket", "type": "ordinal", "title": "Size"},
+                    {"field": "hunks", "type": "quantitative"}
+                ]
+            }
+        });
+        content.push_str(&vegalite_div("hunk-size-dist", "Hunk Size Distribution", &spec));
+    }
+
+    // Section 5: Hunks per commit over time (monthly trend)
+    let data = query_json_array(
+        conn,
+        &format!(
+            "SELECT strftime('%Y-%m', c.author_date) AS month,
+                    round(count(*) * 1.0 / count(DISTINCT ch.commit_hash), 1) AS avg_hunks,
+                    count(*) AS total_hunks
+             FROM commit_hunks ch
+             JOIN commits c ON c.hash = ch.commit_hash AND c.first_parent = 1
+             WHERE 1=1{df}
+             GROUP BY month ORDER BY month"
+        ),
+        &[],
+    )?;
+    if !data.is_empty() {
+        let spec = json!({
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "width": "container", "height": 300,
+            "data": {"values": data},
+            "mark": {"type": "line", "interpolate": "monotone"},
+            "encoding": {
+                "x": {"field": "month", "type": "temporal", "title": "Month"},
+                "y": {"field": "avg_hunks", "type": "quantitative", "title": "Avg Hunks per Commit"},
+                "tooltip": [
+                    {"field": "month", "type": "temporal"},
+                    {"field": "avg_hunks", "type": "quantitative"},
+                    {"field": "total_hunks", "type": "quantitative", "title": "Total Hunks"}
+                ]
+            }
+        });
+        content.push_str(&vegalite_div(
+            "hunk-trend",
+            "Change Fragmentation Over Time (Avg Hunks per Commit)",
+            &spec,
+        ));
+    }
+
+    // Section 6: Files with highest avg hunks per commit (most scattered changes)
+    let (headers, rows) = query_table(
+        conn,
+        &format!(
+            "SELECT ch.path AS File,
+                    count(DISTINCT ch.commit_hash) AS Commits,
+                    count(*) AS \"Total Hunks\",
+                    round(count(*) * 1.0 / count(DISTINCT ch.commit_hash), 1) AS \"Avg Hunks/Commit\",
+                    round(avg(ch.new_lines + ch.old_lines), 1) AS \"Avg Hunk Size\"
+             FROM commit_hunks ch
+             JOIN commits c ON c.hash = ch.commit_hash AND c.first_parent = 1
+             WHERE 1=1{df}
+             GROUP BY ch.path
+             HAVING count(DISTINCT ch.commit_hash) >= 10
+             ORDER BY \"Avg Hunks/Commit\" DESC LIMIT 30"
+        ),
+        &[],
+    )?;
+    if !rows.is_empty() {
+        let header_refs: Vec<&str> = headers.iter().map(|s| s.as_str()).collect();
+        content.push_str(&html_table_section(
+            "Most Scattered Changes (10+ commits, by Avg Hunks/Commit)",
+            &header_refs,
+            &rows,
+        ));
+    }
+
+    Ok(("Hotspots".to_string(), content))
 }

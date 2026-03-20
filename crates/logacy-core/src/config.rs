@@ -17,12 +17,18 @@ pub struct Config {
     pub blame: BlameConfig,
     #[serde(default)]
     pub index: IndexConfig,
+    #[serde(default)]
+    pub releases: ReleasesConfig,
 }
 
 #[derive(Debug, Deserialize, Default)]
 pub struct RepositoryConfig {
     pub ticket_pattern: Option<String>,
     pub component_pattern: Option<String>,
+    /// URL template for linking tickets to an issue tracker.
+    /// Use `{ticket}` as placeholder, e.g. `https://jira.example.com/browse/{ticket}`
+    /// or `https://github.com/owner/repo/issues/{ticket}`.
+    pub ticket_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,6 +76,21 @@ pub struct IdentityConfig {
     pub orgs: Vec<OrgDomain>,
     #[serde(default)]
     pub org_overrides: Vec<OrgOverride>,
+    #[serde(default)]
+    pub aliases: Vec<IdentityAlias>,
+}
+
+/// Explicit identity alias: merge multiple name/email pairs into one identity.
+/// Overrides or supplements `.mailmap` resolution.
+#[derive(Debug, Deserialize)]
+pub struct IdentityAlias {
+    /// Canonical display name for this person.
+    pub name: String,
+    /// All known email addresses. The first is used as canonical_email.
+    #[serde(default, deserialize_with = "string_or_vec")]
+    pub emails: Vec<String>,
+    /// Optional org affiliation (creates an identity_affiliations row).
+    pub org: Option<String>,
 }
 
 /// Direct org assignment for identities that can't be resolved by email domain
@@ -172,6 +193,28 @@ impl Default for IndexConfig {
             first_parent: true,
             include_diff_stats: true,
             include_file_list: true,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReleasesConfig {
+    /// Glob pattern to filter tags, e.g. "v*"
+    pub tag_pattern: Option<String>,
+    /// Branch patterns for release branches (future use), e.g. ["release/*"]
+    #[serde(default)]
+    pub branch_patterns: Vec<String>,
+    /// Whether to map commits to their containing release
+    #[serde(default = "default_true")]
+    pub map_commits: bool,
+}
+
+impl Default for ReleasesConfig {
+    fn default() -> Self {
+        Self {
+            tag_pattern: None,
+            branch_patterns: Vec::new(),
+            map_commits: true,
         }
     }
 }
