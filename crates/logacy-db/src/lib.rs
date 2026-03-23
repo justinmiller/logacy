@@ -203,17 +203,13 @@ CREATE TABLE IF NOT EXISTS organizations (
 CREATE TABLE IF NOT EXISTS org_domain_rules (
     id          INTEGER PRIMARY KEY,
     org_id      INTEGER NOT NULL REFERENCES organizations(id),
-    domain      TEXT NOT NULL,
-    valid_from  TEXT,
-    valid_until TEXT
+    domain      TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS identity_affiliations (
     id          INTEGER PRIMARY KEY,
     identity_id INTEGER NOT NULL REFERENCES identities(id),
     org_id      INTEGER NOT NULL REFERENCES organizations(id),
-    valid_from  TEXT,
-    valid_until TEXT,
     source      TEXT NOT NULL
 );
 
@@ -328,8 +324,7 @@ CREATE TABLE IF NOT EXISTS commit_org_attribution (
     org_name        TEXT,
     source          TEXT NOT NULL,
     matched_email   TEXT,
-    matched_domain  TEXT,
-    matched_rule_id INTEGER REFERENCES org_domain_rules(id)
+    matched_domain  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS trailer_org_attribution (
@@ -341,7 +336,6 @@ CREATE TABLE IF NOT EXISTS trailer_org_attribution (
     source          TEXT NOT NULL,
     matched_email   TEXT,
     matched_domain  TEXT,
-    matched_rule_id INTEGER REFERENCES org_domain_rules(id),
     PRIMARY KEY (commit_hash, key, seq)
 );
 
@@ -387,7 +381,7 @@ CREATE INDEX IF NOT EXISTS idx_commit_releases_tag ON commit_releases(release_ta
 -- Views
 
 -- Per-identity current org: picks the best affiliation.
--- Priority: alias_override > org_override > domain_rule, then most recent valid_from.
+-- Priority: alias_override > org_override > domain_rule.
 CREATE VIEW IF NOT EXISTS v_identity_org AS
 SELECT ia.identity_id, o.name AS org
 FROM identity_affiliations ia
@@ -396,8 +390,7 @@ WHERE ia.id = (
     SELECT ia2.id FROM identity_affiliations ia2
     WHERE ia2.identity_id = ia.identity_id
     ORDER BY
-      CASE ia2.source WHEN 'alias_override' THEN 0 WHEN 'org_override' THEN 1 ELSE 2 END,
-      COALESCE(ia2.valid_from, '9999') DESC
+      CASE ia2.source WHEN 'alias_override' THEN 0 WHEN 'org_override' THEN 1 ELSE 2 END
     LIMIT 1
 );
 

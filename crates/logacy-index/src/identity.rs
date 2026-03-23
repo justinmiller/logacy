@@ -7,22 +7,52 @@ use rusqlite::Connection;
 
 use logacy_core::config::Config;
 
-// ── Domain types ─────────────────────────────────────────────────────────────
+// ── Union-Find ───────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct CanonicalIdentity {
-    name: String,
-    email: String,
+struct UnionFind {
+    parent: Vec<usize>,
+    rank: Vec<usize>,
 }
 
-struct PersistedIdentity {
-    #[allow(dead_code)]
-    id: i64,
-    #[allow(dead_code)]
-    canonical: CanonicalIdentity,
-    #[allow(dead_code)]
+impl UnionFind {
+    fn new(n: usize) -> Self {
+        Self {
+            parent: (0..n).collect(),
+            rank: vec![0; n],
+        }
+    }
+
+    fn find(&mut self, x: usize) -> usize {
+        if self.parent[x] != x {
+            self.parent[x] = self.find(self.parent[x]);
+        }
+        self.parent[x]
+    }
+
+    fn union(&mut self, a: usize, b: usize) {
+        let ra = self.find(a);
+        let rb = self.find(b);
+        if ra == rb {
+            return;
+        }
+        match self.rank[ra].cmp(&self.rank[rb]) {
+            std::cmp::Ordering::Less => self.parent[ra] = rb,
+            std::cmp::Ordering::Greater => self.parent[rb] = ra,
+            std::cmp::Ordering::Equal => {
+                self.parent[rb] = ra;
+                self.rank[ra] += 1;
+            }
+        }
+    }
+}
+
+// ── Domain types ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+struct MergedIdentity {
+    canonical_name: String,
+    canonical_email: String,
     aliases: Vec<(String, String)>,
-    #[allow(dead_code)]
     is_bot: bool,
 }
 
@@ -51,23 +81,17 @@ fn resolve_canonical(
     email: &str,
     mailmap: &gix::mailmap::Snapshot,
     alias_overrides: &HashMap<String, (String, String)>,
-) -> CanonicalIdentity {
+) -> (String, String) {
     let (mm_name, mm_email) = resolve_via_mailmap(name, email, mailmap);
 
     if let Some(overridden) = alias_overrides
         .get(&email.to_lowercase())
         .or_else(|| alias_overrides.get(&mm_email.to_lowercase()))
     {
-        return CanonicalIdentity {
-            name: overridden.0.clone(),
-            email: overridden.1.clone(),
-        };
+        return (overridden.0.clone(), overridden.1.clone());
     }
 
-    CanonicalIdentity {
-        name: mm_name,
-        email: mm_email,
-    }
+    (mm_name, mm_email)
 }
 
 fn resolve_via_mailmap(
@@ -98,20 +122,159 @@ fn lookup_identity(
     email_to_id: &HashMap<String, i64>,
     pair_to_id: &HashMap<(String, String), i64>,
 ) -> Option<i64> {
-    let canonical = resolve_canonical(name, email, mailmap, alias_overrides);
+    let (cn, ce) = resolve_canonical(name, email, mailmap, alias_overrides);
 
     email_to_id
-        .get(&canonical.email)
+        .get(&ce)
         .copied()
         .or_else(|| email_to_id.get(&email.to_lowercase()).copied())
-        .or_else(|| {
-            pair_to_id
-                .get(&(canonical.name, canonical.email))
-                .copied()
-        })
+        .or_else(|| pair_to_id.get(&(cn, ce)).copied())
 }
 
-// ── Pass 1: Collect observed identities ─────────────────────────────────────
+// ── Loading resolution sources ──────────────────────────────────────────────
+
+fn load_resolution_sources(
+    repo_path: &Path,
+    config: &Config,
+) -> Result<(gix::mailmap::Snapshot, HashMap<String, (String, String)>)> {
+    let repo = gix::open(repo_path).context("failed to open git repository")?;
+
+    let mailmap = if config.identity.mailmap {
+        let mm = repo.open_mailmap();
+        println!("Loaded .mailmap");
+        mm
+    } else {
+        gix::mailmap::Snapshot::default()
+    };
+
+    let alias_overrides = build_alias_overrides(config);
+    if !config.identity.aliases.is_empty() {
+        println!(
+            "Applied {} identity alias rules from config",
+            config.identity.aliases.len()
+        );
+    }
+
+    Ok((mailmap, alias_overrides))
+}
+
+// ── Phase 1: Resolve & merge identities (in-memory) ─────────────────────────
+
+fn resolve_and_merge_identities(
+    conn: &Connection,
+    config: &Config,
+    mailmap: &gix::mailmap::Snapshot,
+    alias_overrides: &HashMap<String, (String, String)>,
+) -> Result<Vec<MergedIdentity>> {
+    // Step 1: Collect all raw (name, email) pairs from commits + trailers
+    let raw_pairs = collect_observed_identities(conn, config)?;
+
+    // Step 2: Resolve each pair through mailmap + config aliases
+    let mut resolved_pairs: Vec<((String, String), (String, String))> = Vec::new();
+    for (name, email) in &raw_pairs {
+        let (cn, ce) = resolve_canonical(name, email, mailmap, alias_overrides);
+        resolved_pairs.push(((name.clone(), email.clone()), (cn, ce)));
+    }
+
+    // Step 3: Union-Find merge — union all pairs sharing the same canonical name
+    let n = resolved_pairs.len();
+    let mut uf = UnionFind::new(n);
+    let mut name_to_first_idx: HashMap<String, usize> = HashMap::new();
+
+    for (i, (_, (cn, _))) in resolved_pairs.iter().enumerate() {
+        let cn_lower = cn.to_lowercase();
+        if let Some(&first) = name_to_first_idx.get(&cn_lower) {
+            uf.union(i, first);
+        } else {
+            name_to_first_idx.insert(cn_lower, i);
+        }
+    }
+
+    // Step 4: Group by find(i) → clusters
+    let mut clusters: HashMap<usize, Vec<usize>> = HashMap::new();
+    for i in 0..n {
+        clusters.entry(uf.find(i)).or_default().push(i);
+    }
+
+    println!(
+        "Found {} distinct name/email pairs, merged to {} identities",
+        raw_pairs.len(),
+        clusters.len()
+    );
+
+    // Step 5: For each cluster, pick canonical name/email and collect aliases
+    let bot_emails: Vec<String> = config
+        .identity
+        .bot_emails
+        .iter()
+        .map(|e| e.to_lowercase())
+        .collect();
+    let bot_names: Vec<String> = config
+        .identity
+        .bot_names
+        .iter()
+        .map(|n| n.to_lowercase())
+        .collect();
+
+    let mut merged = Vec::with_capacity(clusters.len());
+    for (_, indices) in clusters {
+        // Collect all raw aliases and all resolved (name, email) pairs
+        let mut all_raw: Vec<(String, String)> = Vec::new();
+        let mut all_resolved: Vec<(String, String)> = Vec::new();
+        for &i in &indices {
+            all_raw.push(resolved_pairs[i].0.clone());
+            all_resolved.push(resolved_pairs[i].1.clone());
+        }
+
+        // Pick canonical: prefer config alias override, else first resolved pair
+        // (config alias canonical email is already set correctly by resolve_canonical)
+        let (canonical_name, canonical_email) = {
+            // Check if any resolved email is in alias_overrides
+            let alias_pick = all_resolved.iter().find(|(_, ce)| {
+                alias_overrides.contains_key(&ce.to_lowercase())
+            });
+            if let Some(pick) = alias_pick {
+                pick.clone()
+            } else {
+                all_resolved[0].clone()
+            }
+        };
+
+        let is_bot = bot_emails.contains(&canonical_email.to_lowercase())
+            || bot_names.contains(&canonical_name.to_lowercase());
+
+        // Deduplicate raw aliases
+        let mut alias_set = HashSet::new();
+        let mut aliases = Vec::new();
+        for raw in all_raw {
+            if alias_set.insert(raw.clone()) {
+                aliases.push(raw);
+            }
+        }
+        // Also add all resolved pairs as aliases (canonical email variants)
+        for resolved in &all_resolved {
+            if alias_set.insert(resolved.clone()) {
+                aliases.push(resolved.clone());
+            }
+        }
+
+        merged.push(MergedIdentity {
+            canonical_name,
+            canonical_email,
+            aliases,
+            is_bot,
+        });
+    }
+
+    let bot_count = merged.iter().filter(|m| m.is_bot).count();
+    println!(
+        "Identity resolution complete: {} identities ({} bots)",
+        merged.len(),
+        bot_count
+    );
+
+    Ok(merged)
+}
 
 fn collect_observed_identities(
     conn: &Connection,
@@ -151,61 +314,19 @@ fn collect_observed_identities(
         }
     }
 
-    println!("Found {} distinct name/email pairs", pairs.len());
     Ok(pairs)
 }
 
-// ── Pass 2: Resolve canonical identities ────────────────────────────────────
+// ── Phase 2: Persist identities ──────────────────────────────────────────────
 
-fn resolve_canonical_identities(
-    raw_pairs: &HashSet<(String, String)>,
+fn persist_identities(
+    tx: &Connection,
+    merged: &[MergedIdentity],
+    config: &Config,
     mailmap: &gix::mailmap::Snapshot,
     alias_overrides: &HashMap<String, (String, String)>,
-) -> HashMap<(String, String), CanonicalIdentity> {
-    let mut resolved = HashMap::new();
-    for (name, email) in raw_pairs {
-        let canonical = resolve_canonical(name, email, mailmap, alias_overrides);
-        resolved.insert((name.clone(), email.clone()), canonical);
-    }
-    resolved
-}
-
-// ── Pass 3: Persist identities and aliases ──────────────────────────────────
-// No same-name auto-merge. Only mailmap and config aliases merge identities.
-
-fn persist_identities_and_aliases(
-    tx: &Connection,
-    resolved: &HashMap<(String, String), CanonicalIdentity>,
-    config: &Config,
-) -> Result<(Vec<PersistedIdentity>, HashMap<String, i64>, HashMap<(String, String), i64>)> {
-    // Group by canonical identity → collect raw aliases
-    let mut identity_groups: HashMap<CanonicalIdentity, Vec<(String, String)>> = HashMap::new();
-    for (raw, canonical) in resolved {
-        identity_groups
-            .entry(canonical.clone())
-            .or_default()
-            .push(raw.clone());
-    }
-
-    println!(
-        "Resolved to {} unique canonical identities",
-        identity_groups.len()
-    );
-
-    // Determine bots
-    let bot_emails: Vec<String> = config
-        .identity
-        .bot_emails
-        .iter()
-        .map(|e| e.to_lowercase())
-        .collect();
-    let bot_names: Vec<String> = config
-        .identity
-        .bot_names
-        .iter()
-        .map(|n| n.to_lowercase())
-        .collect();
-
+) -> Result<()> {
+    // Insert identities and aliases
     let mut insert_identity = tx.prepare(
         "INSERT INTO identities (canonical_name, canonical_email, is_bot)
          VALUES (?1, ?2, ?3)",
@@ -215,75 +336,42 @@ fn persist_identities_and_aliases(
          VALUES (?1, ?2, ?3)",
     )?;
 
-    let mut persisted = Vec::new();
     let mut email_to_id: HashMap<String, i64> = HashMap::new();
     let mut pair_to_id: HashMap<(String, String), i64> = HashMap::new();
-    let mut bot_count = 0;
 
-    for (canonical, aliases) in &identity_groups {
-        let is_bot = bot_emails.contains(&canonical.email.to_lowercase())
-            || bot_names.contains(&canonical.name.to_lowercase());
-
+    for identity in merged {
         insert_identity.execute(rusqlite::params![
-            canonical.name,
-            canonical.email,
-            is_bot as i32,
+            identity.canonical_name,
+            identity.canonical_email,
+            identity.is_bot as i32,
         ])?;
         let identity_id = tx.last_insert_rowid();
-        if is_bot {
-            bot_count += 1;
-        }
 
         // Insert canonical as an alias
         insert_alias.execute(rusqlite::params![
             identity_id,
-            canonical.name,
-            canonical.email,
+            identity.canonical_name,
+            identity.canonical_email,
         ])?;
 
-        for (raw_name, raw_email) in aliases {
+        for (raw_name, raw_email) in &identity.aliases {
             insert_alias
                 .execute(rusqlite::params![identity_id, raw_name, raw_email])
                 .ok(); // ignore dupes
         }
 
         // Register for backfill lookups
-        email_to_id.insert(canonical.email.clone(), identity_id);
-        for (raw_name, raw_email) in aliases {
+        email_to_id.insert(identity.canonical_email.clone(), identity_id);
+        for (raw_name, raw_email) in &identity.aliases {
             email_to_id.insert(raw_email.clone(), identity_id);
             pair_to_id.insert((raw_name.clone(), raw_email.clone()), identity_id);
         }
-
-        persisted.push(PersistedIdentity {
-            id: identity_id,
-            canonical: canonical.clone(),
-            aliases: aliases.clone(),
-            is_bot,
-        });
     }
 
     drop(insert_identity);
     drop(insert_alias);
 
-    println!(
-        "Identity resolution complete: {} identities ({} bots)",
-        persisted.len(),
-        bot_count
-    );
-
-    Ok((persisted, email_to_id, pair_to_id))
-}
-
-// ── Pass 3b: Backfill author_id / committer_id / trailer identity_id ────────
-
-fn backfill_identity_ids(
-    tx: &Connection,
-    config: &Config,
-    mailmap: &gix::mailmap::Snapshot,
-    alias_overrides: &HashMap<String, (String, String)>,
-    email_to_id: &HashMap<String, i64>,
-    pair_to_id: &HashMap<(String, String), i64>,
-) -> Result<()> {
+    // Backfill author_id / committer_id
     println!("Backfilling author_id / committer_id...");
     {
         let mut update_author = tx.prepare(
@@ -293,12 +381,13 @@ fn backfill_identity_ids(
             "UPDATE commits SET committer_id = ?1 WHERE committer_name = ?2 AND committer_email = ?3",
         )?;
 
-        for ((raw_name, raw_email), &id) in pair_to_id {
+        for ((raw_name, raw_email), &id) in &pair_to_id {
             update_author.execute(rusqlite::params![id, raw_name, raw_email])?;
             update_committer.execute(rusqlite::params![id, raw_name, raw_email])?;
         }
     }
 
+    // Resolve trailer identities
     println!("Resolving trailer identities...");
     {
         let identity_keys = &config.trailers.identity_keys;
@@ -338,8 +427,8 @@ fn backfill_identity_ids(
                     &t_email,
                     mailmap,
                     alias_overrides,
-                    email_to_id,
-                    pair_to_id,
+                    &email_to_id,
+                    &pair_to_id,
                 ) {
                     update_trailer.execute(rusqlite::params![id, commit_hash, key, seq])?;
                     resolved_count += 1;
@@ -354,24 +443,28 @@ fn backfill_identity_ids(
         );
     }
 
+    // Populate identity_emails
+    populate_identity_emails(tx)?;
+
+    // Select preferred email by recency
+    select_preferred_email_by_recency(tx)?;
+
     Ok(())
 }
-
-// ── Pass 4: Populate identity_emails ────────────────────────────────────────
 
 fn populate_identity_emails(tx: &Connection) -> Result<()> {
     // Collect email usage from commits (author)
     tx.execute_batch(
         "INSERT OR IGNORE INTO identity_emails (identity_id, email, first_seen_at, last_seen_at, commit_count, trailer_count, source, is_preferred)
          SELECT c.author_id, c.author_email,
-                MIN(c.author_date), MAX(c.author_date),
+                MIN(c.commit_date), MAX(c.commit_date),
                 COUNT(*), 0, 'commit', 0
          FROM commits c
          WHERE c.author_id IS NOT NULL
          GROUP BY c.author_id, c.author_email;",
     )?;
 
-    // Upsert committer emails — merge counts and extend date range if already present.
+    // Upsert committer emails
     tx.execute_batch(
         "INSERT INTO identity_emails (identity_id, email, first_seen_at, last_seen_at, commit_count, trailer_count, source, is_preferred)
          SELECT c.committer_id, c.committer_email,
@@ -390,7 +483,7 @@ fn populate_identity_emails(tx: &Connection) -> Result<()> {
     tx.execute_batch(
         "INSERT INTO identity_emails (identity_id, email, first_seen_at, last_seen_at, commit_count, trailer_count, source, is_preferred)
          SELECT t.identity_id, t.parsed_email,
-                MIN(c.author_date), MAX(c.author_date),
+                MIN(c.commit_date), MAX(c.commit_date),
                 0, COUNT(*), 'trailer', 0
          FROM trailers t
          JOIN commits c ON c.hash = t.commit_hash
@@ -408,14 +501,7 @@ fn populate_identity_emails(tx: &Connection) -> Result<()> {
     Ok(())
 }
 
-// ── Pass 5: Select preferred email by recency ───────────────────────────────
-
 fn select_preferred_email_by_recency(tx: &Connection) -> Result<()> {
-    // Mark the most recently used email as preferred for each identity.
-    // Ties broken by email text for determinism.
-    // Do NOT update identities.canonical_email — that is set by the resolution
-    // pipeline and is part of the UNIQUE constraint. The preferred email lives
-    // in identity_emails.is_preferred and is used for downstream org attribution.
     tx.execute_batch(
         "UPDATE identity_emails SET is_preferred = 1
          WHERE rowid IN (
@@ -432,11 +518,26 @@ fn select_preferred_email_by_recency(tx: &Connection) -> Result<()> {
     Ok(())
 }
 
-// ── Pass 6: Load organizations and domain rules ─────────────────────────────
+// ── Phase 3: Org attribution ─────────────────────────────────────────────────
+
+fn materialize_org_attribution(tx: &Connection, config: &Config) -> Result<()> {
+    // Load organizations and domain rules
+    load_organizations_and_rules(tx, config)?;
+
+    // Populate identity affiliations
+    populate_identity_affiliations(tx, config)?;
+
+    // Materialize commit org attribution
+    materialize_commit_org_attribution(tx)?;
+
+    // Materialize trailer org attribution
+    materialize_trailer_org_attribution(tx, config)?;
+
+    Ok(())
+}
 
 fn load_organizations_and_rules(tx: &Connection, config: &Config) -> Result<()> {
-    // Always insert org names from all config sources, not just [[identity.orgs]].
-    // org_overrides and alias-level orgs need organization rows to exist too.
+    // Insert org names from all config sources
     for ovr in &config.identity.org_overrides {
         tx.execute(
             "INSERT OR IGNORE INTO organizations (name) VALUES (?1)",
@@ -460,20 +561,15 @@ fn load_organizations_and_rules(tx: &Connection, config: &Config) -> Result<()> 
         "INSERT OR IGNORE INTO organizations (name) VALUES (?1)",
     )?;
     let mut insert_rule = tx.prepare(
-        "INSERT INTO org_domain_rules (org_id, domain, valid_from, valid_until)
-         VALUES ((SELECT id FROM organizations WHERE name = ?1), ?2, ?3, ?4)",
+        "INSERT INTO org_domain_rules (org_id, domain)
+         VALUES ((SELECT id FROM organizations WHERE name = ?1), ?2)",
     )?;
 
     let mut domain_count = 0usize;
     for org in &config.identity.orgs {
         insert_org.execute(rusqlite::params![org.org])?;
         for domain in org.all_domains() {
-            insert_rule.execute(rusqlite::params![
-                org.org,
-                domain,
-                org.from,
-                org.until,
-            ])?;
+            insert_rule.execute(rusqlite::params![org.org, domain])?;
             domain_count += 1;
         }
     }
@@ -482,29 +578,19 @@ fn load_organizations_and_rules(tx: &Connection, config: &Config) -> Result<()> 
     Ok(())
 }
 
-// ── Pass 7: Populate identity affiliations ──────────────────────────────────
-
 fn populate_identity_affiliations(tx: &Connection, config: &Config) -> Result<()> {
-    // From org_domain_rules: match each identity's emails against domain rules.
-    // Domain matching covers: exact @domain, subdomains (.domain), and bare identifiers.
+    // From org_domain_rules: match each identity's emails against domain rules
     tx.execute_batch(
-        "INSERT INTO identity_affiliations (identity_id, org_id, valid_from, valid_until, source)
-         SELECT DISTINCT ie.identity_id, odr.org_id, odr.valid_from, odr.valid_until, 'domain_rule'
+        "INSERT INTO identity_affiliations (identity_id, org_id, source)
+         SELECT DISTINCT ie.identity_id, odr.org_id, 'domain_rule'
          FROM identity_emails ie
          JOIN org_domain_rules odr
            ON (ie.email LIKE '%@' || odr.domain
                OR ie.email LIKE '%.' || odr.domain
-               OR (INSTR(ie.email, '@') = 0 AND odr.domain = '(bare)'))
-         WHERE NOT EXISTS (
-             SELECT 1 FROM identity_affiliations ia
-             WHERE ia.identity_id = ie.identity_id AND ia.org_id = odr.org_id
-               AND COALESCE(ia.valid_from, '') = COALESCE(odr.valid_from, '')
-               AND COALESCE(ia.valid_until, '') = COALESCE(odr.valid_until, '')
-         );",
+               OR (INSTR(ie.email, '@') = 0 AND odr.domain = '(bare)'));",
     )?;
 
-    // From config org_overrides — these always apply, even when a domain-derived
-    // affiliation already exists. Explicit overrides are authoritative.
+    // From config org_overrides
     let mut override_count = 0u64;
     for ovr in &config.identity.org_overrides {
         let updated = match (&ovr.name, &ovr.email) {
@@ -530,7 +616,7 @@ fn populate_identity_affiliations(tx: &Connection, config: &Config) -> Result<()
         println!("Applied {} org overrides", override_count);
     }
 
-    // From config aliases with org — alias_override is authoritative too.
+    // From config aliases with org
     for alias in &config.identity.aliases {
         if let Some(ref org) = alias.org {
             tx.execute(
@@ -549,32 +635,19 @@ fn populate_identity_affiliations(tx: &Connection, config: &Config) -> Result<()
     Ok(())
 }
 
-// ── Pass 8: Materialize commit org attribution ──────────────────────────────
-
 fn materialize_commit_org_attribution(tx: &Connection) -> Result<()> {
-    // Domain match condition used throughout: @domain, subdomains (.domain), bare identifiers.
-    // When multiple rules match, pick the one with the most specific (latest) valid_from.
-
-    // Pass 1: raw commit email domain → org_domain_rules with temporal bounds
-    // Use a correlated subquery to pick exactly one rule per commit deterministically.
+    // Simple domain match: raw commit email → org_domain_rules (no temporal bounds)
     tx.execute_batch(
-        "INSERT OR IGNORE INTO commit_org_attribution (commit_hash, org_id, org_name, source, matched_email, matched_domain, matched_rule_id)
-         SELECT c.hash, odr.org_id, o.name, 'raw_email_domain', c.author_email, odr.domain, odr.id
+        "INSERT OR IGNORE INTO commit_org_attribution (commit_hash, org_id, org_name, source, matched_email, matched_domain)
+         SELECT c.hash, odr.org_id, o.name, 'email_domain', c.author_email, odr.domain
          FROM commits c
-         JOIN org_domain_rules odr ON odr.id = (
-             SELECT odr2.id FROM org_domain_rules odr2
-             WHERE (c.author_email LIKE '%@' || odr2.domain
-                    OR c.author_email LIKE '%.' || odr2.domain
-                    OR (INSTR(c.author_email, '@') = 0 AND odr2.domain = '(bare)'))
-               AND (odr2.valid_from IS NULL OR c.author_date >= odr2.valid_from)
-               AND (odr2.valid_until IS NULL OR c.author_date < odr2.valid_until)
-             ORDER BY odr2.valid_from DESC
-             LIMIT 1
-         )
+         JOIN org_domain_rules odr
+           ON (c.author_email LIKE '%@' || odr.domain
+               OR (INSTR(c.author_email, '@') = 0 AND odr.domain = '(bare)'))
          JOIN organizations o ON o.id = odr.org_id;",
     )?;
 
-    // Pass 2: dated identity affiliation (prefer overrides, then most specific date)
+    // Fallback: identity affiliation for commits not yet attributed
     tx.execute_batch(
         "INSERT OR IGNORE INTO commit_org_attribution (commit_hash, org_id, org_name, source, matched_email, matched_domain)
          SELECT c.hash, ia.org_id, o.name, 'affiliation', NULL, NULL
@@ -582,11 +655,8 @@ fn materialize_commit_org_attribution(tx: &Connection) -> Result<()> {
          JOIN identity_affiliations ia ON ia.id = (
              SELECT ia2.id FROM identity_affiliations ia2
              WHERE ia2.identity_id = c.author_id
-               AND (ia2.valid_from IS NULL OR c.author_date >= ia2.valid_from)
-               AND (ia2.valid_until IS NULL OR c.author_date < ia2.valid_until)
              ORDER BY
-               CASE ia2.source WHEN 'alias_override' THEN 0 WHEN 'org_override' THEN 1 ELSE 2 END,
-               ia2.valid_from DESC
+               CASE ia2.source WHEN 'alias_override' THEN 0 WHEN 'org_override' THEN 1 ELSE 2 END
              LIMIT 1
          )
          JOIN organizations o ON o.id = ia.org_id
@@ -594,21 +664,15 @@ fn materialize_commit_org_attribution(tx: &Connection) -> Result<()> {
            AND c.hash NOT IN (SELECT commit_hash FROM commit_org_attribution);",
     )?;
 
-    // Pass 3: preferred email domain
+    // Fallback: preferred email domain for remaining unattributed commits
     tx.execute_batch(
-        "INSERT OR IGNORE INTO commit_org_attribution (commit_hash, org_id, org_name, source, matched_email, matched_domain, matched_rule_id)
-         SELECT c.hash, odr.org_id, o.name, 'preferred_email_domain', ie.email, odr.domain, odr.id
+        "INSERT OR IGNORE INTO commit_org_attribution (commit_hash, org_id, org_name, source, matched_email, matched_domain)
+         SELECT c.hash, odr.org_id, o.name, 'preferred_email_domain', ie.email, odr.domain
          FROM commits c
          JOIN identity_emails ie ON ie.identity_id = c.author_id AND ie.is_preferred = 1
-         JOIN org_domain_rules odr ON odr.id = (
-             SELECT odr2.id FROM org_domain_rules odr2
-             WHERE (ie.email LIKE '%@' || odr2.domain
-                    OR ie.email LIKE '%.' || odr2.domain)
-               AND (odr2.valid_from IS NULL OR c.author_date >= odr2.valid_from)
-               AND (odr2.valid_until IS NULL OR c.author_date < odr2.valid_until)
-             ORDER BY odr2.valid_from DESC
-             LIMIT 1
-         )
+         JOIN org_domain_rules odr
+           ON (ie.email LIKE '%@' || odr.domain
+               OR ie.email LIKE '%.' || odr.domain)
          JOIN organizations o ON o.id = odr.org_id
          WHERE c.author_id IS NOT NULL
            AND c.hash NOT IN (SELECT commit_hash FROM commit_org_attribution);",
@@ -619,8 +683,6 @@ fn materialize_commit_org_attribution(tx: &Connection) -> Result<()> {
 
     Ok(())
 }
-
-// ── Pass 9: Materialize trailer org attribution ─────────────────────────────
 
 fn materialize_trailer_org_attribution(tx: &Connection, config: &Config) -> Result<()> {
     let identity_keys = &config.trailers.identity_keys;
@@ -634,23 +696,15 @@ fn materialize_trailer_org_attribution(tx: &Connection, config: &Config) -> Resu
         .map(|k| k as &dyn rusqlite::types::ToSql)
         .collect();
 
-    // Pass 1: parsed trailer email domain → org_domain_rules with temporal bounds
-    // Deterministic: correlated subquery picks most-specific rule per trailer.
+    // Simple domain match: parsed trailer email → org_domain_rules
     let sql1 = format!(
-        "INSERT OR IGNORE INTO trailer_org_attribution (commit_hash, key, seq, org_id, org_name, source, matched_email, matched_domain, matched_rule_id)
-         SELECT t.commit_hash, t.key, t.seq, odr.org_id, o.name, 'parsed_email_domain', t.parsed_email, odr.domain, odr.id
+        "INSERT OR IGNORE INTO trailer_org_attribution (commit_hash, key, seq, org_id, org_name, source, matched_email, matched_domain)
+         SELECT t.commit_hash, t.key, t.seq, odr.org_id, o.name, 'parsed_email_domain', t.parsed_email, odr.domain
          FROM trailers t
-         JOIN commits c ON c.hash = t.commit_hash
-         JOIN org_domain_rules odr ON odr.id = (
-             SELECT odr2.id FROM org_domain_rules odr2
-             WHERE (t.parsed_email LIKE '%@' || odr2.domain
-                    OR t.parsed_email LIKE '%.' || odr2.domain
-                    OR (INSTR(t.parsed_email, '@') = 0 AND odr2.domain = '(bare)'))
-               AND (odr2.valid_from IS NULL OR c.author_date >= odr2.valid_from)
-               AND (odr2.valid_until IS NULL OR c.author_date < odr2.valid_until)
-             ORDER BY odr2.valid_from DESC
-             LIMIT 1
-         )
+         JOIN org_domain_rules odr
+           ON (t.parsed_email LIKE '%@' || odr.domain
+               OR t.parsed_email LIKE '%.' || odr.domain
+               OR (INSTR(t.parsed_email, '@') = 0 AND odr.domain = '(bare)'))
          JOIN organizations o ON o.id = odr.org_id
          WHERE t.key IN ({placeholders})
            AND t.parsed_email IS NOT NULL;"
@@ -659,20 +713,16 @@ fn materialize_trailer_org_attribution(tx: &Connection, config: &Config) -> Resu
     stmt.execute(params.as_slice())?;
     drop(stmt);
 
-    // Pass 2: dated identity affiliation for resolved trailer identities
+    // Fallback: identity affiliation for resolved trailer identities
     let sql2 = format!(
         "INSERT OR IGNORE INTO trailer_org_attribution (commit_hash, key, seq, org_id, org_name, source, matched_email, matched_domain)
          SELECT t.commit_hash, t.key, t.seq, ia.org_id, o.name, 'affiliation', NULL, NULL
          FROM trailers t
-         JOIN commits c ON c.hash = t.commit_hash
          JOIN identity_affiliations ia ON ia.id = (
              SELECT ia2.id FROM identity_affiliations ia2
              WHERE ia2.identity_id = t.identity_id
-               AND (ia2.valid_from IS NULL OR c.author_date >= ia2.valid_from)
-               AND (ia2.valid_until IS NULL OR c.author_date < ia2.valid_until)
              ORDER BY
-               CASE ia2.source WHEN 'alias_override' THEN 0 WHEN 'org_override' THEN 1 ELSE 2 END,
-               ia2.valid_from DESC
+               CASE ia2.source WHEN 'alias_override' THEN 0 WHEN 'org_override' THEN 1 ELSE 2 END
              LIMIT 1
          )
          JOIN organizations o ON o.id = ia.org_id
@@ -687,22 +737,15 @@ fn materialize_trailer_org_attribution(tx: &Connection, config: &Config) -> Resu
     stmt.execute(params.as_slice())?;
     drop(stmt);
 
-    // Pass 3: preferred email domain for resolved trailer identities
+    // Fallback: preferred email domain for remaining unattributed trailers
     let sql3 = format!(
-        "INSERT OR IGNORE INTO trailer_org_attribution (commit_hash, key, seq, org_id, org_name, source, matched_email, matched_domain, matched_rule_id)
-         SELECT t.commit_hash, t.key, t.seq, odr.org_id, o.name, 'preferred_email_domain', ie.email, odr.domain, odr.id
+        "INSERT OR IGNORE INTO trailer_org_attribution (commit_hash, key, seq, org_id, org_name, source, matched_email, matched_domain)
+         SELECT t.commit_hash, t.key, t.seq, odr.org_id, o.name, 'preferred_email_domain', ie.email, odr.domain
          FROM trailers t
-         JOIN commits c ON c.hash = t.commit_hash
          JOIN identity_emails ie ON ie.identity_id = t.identity_id AND ie.is_preferred = 1
-         JOIN org_domain_rules odr ON odr.id = (
-             SELECT odr2.id FROM org_domain_rules odr2
-             WHERE (ie.email LIKE '%@' || odr2.domain
-                    OR ie.email LIKE '%.' || odr2.domain)
-               AND (odr2.valid_from IS NULL OR c.author_date >= odr2.valid_from)
-               AND (odr2.valid_until IS NULL OR c.author_date < odr2.valid_until)
-             ORDER BY odr2.valid_from DESC
-             LIMIT 1
-         )
+         JOIN org_domain_rules odr
+           ON (ie.email LIKE '%@' || odr.domain
+               OR ie.email LIKE '%.' || odr.domain)
          JOIN organizations o ON o.id = odr.org_id
          WHERE t.key IN ({placeholders})
            AND t.identity_id IS NOT NULL
@@ -720,36 +763,9 @@ fn materialize_trailer_org_attribution(tx: &Connection, config: &Config) -> Resu
     Ok(())
 }
 
-// ── Main entry point ────────────────────────────────────────────────────────
+// ── Clear tables ─────────────────────────────────────────────────────────────
 
-pub fn run_identity(repo_path: &Path, conn: &Connection, config: &Config) -> Result<()> {
-    let repo = gix::open(repo_path).context("failed to open git repository")?;
-
-    let mailmap = if config.identity.mailmap {
-        let mm = repo.open_mailmap();
-        println!("Loaded .mailmap");
-        mm
-    } else {
-        gix::mailmap::Snapshot::default()
-    };
-
-    let alias_overrides = build_alias_overrides(config);
-
-    // Pass 1: Collect observed identities
-    let raw_pairs = collect_observed_identities(conn, config)?;
-
-    // Pass 2: Resolve canonical identities
-    let resolved = resolve_canonical_identities(&raw_pairs, &mailmap, &alias_overrides);
-
-    if !config.identity.aliases.is_empty() {
-        println!(
-            "Applied {} identity alias rules from config",
-            config.identity.aliases.len()
-        );
-    }
-
-    // Clear and rebuild identity-related tables
-    let tx = conn.unchecked_transaction()?;
+fn clear_identity_tables(tx: &Connection) -> Result<()> {
     tx.execute_batch(
         "DELETE FROM trailer_org_attribution;
          DELETE FROM commit_org_attribution;
@@ -766,31 +782,25 @@ pub fn run_identity(repo_path: &Path, conn: &Connection, config: &Config) -> Res
          UPDATE commits SET author_id = NULL, committer_id = NULL;
          DELETE FROM identities;",
     )?;
+    Ok(())
+}
 
-    // Pass 3: Persist identities and aliases
-    let (_persisted, email_to_id, pair_to_id) =
-        persist_identities_and_aliases(&tx, &resolved, config)?;
+// ── Main entry point ────────────────────────────────────────────────────────
 
-    // Pass 3b: Backfill identity IDs on commits and trailers
-    backfill_identity_ids(&tx, config, &mailmap, &alias_overrides, &email_to_id, &pair_to_id)?;
+pub fn run_identity(repo_path: &Path, conn: &Connection, config: &Config) -> Result<()> {
+    let (mailmap, alias_overrides) = load_resolution_sources(repo_path, config)?;
 
-    // Pass 4: Populate identity_emails
-    populate_identity_emails(&tx)?;
+    // Phase 1: Resolve & merge (in-memory)
+    let merged = resolve_and_merge_identities(conn, config, &mailmap, &alias_overrides)?;
 
-    // Pass 5: Select preferred email by recency
-    select_preferred_email_by_recency(&tx)?;
+    let tx = conn.unchecked_transaction()?;
+    clear_identity_tables(&tx)?;
 
-    // Pass 6: Load organizations and domain rules
-    load_organizations_and_rules(&tx, config)?;
+    // Phase 2: Persist
+    persist_identities(&tx, &merged, config, &mailmap, &alias_overrides)?;
 
-    // Pass 7: Populate identity affiliations
-    populate_identity_affiliations(&tx, config)?;
-
-    // Pass 8: Materialize commit org attribution
-    materialize_commit_org_attribution(&tx)?;
-
-    // Pass 9: Materialize trailer org attribution
-    materialize_trailer_org_attribution(&tx, config)?;
+    // Phase 3: Org attribution
+    materialize_org_attribution(&tx, config)?;
 
     tx.commit()?;
 

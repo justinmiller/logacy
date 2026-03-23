@@ -51,6 +51,7 @@ main { flex: 1; overflow-y: auto; padding: 1.5rem 2rem; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
         padding: 1.25rem; margin-bottom: 1.25rem; }
 .card h3 { font-size: 1rem; margin-bottom: 0.75rem; color: var(--text); }
+.card-desc { font-size: 0.8rem; color: var(--text2); margin: -0.5rem 0 0.75rem; line-height: 1.4; }
 .chart { width: 100%; min-height: 200px; }
 
 table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
@@ -261,14 +262,10 @@ async function loadOverview() {
       <div class="stat"><div class="val">${status.max_date?.slice(0,10)||'—'}</div><div class="lbl">Last commit</div></div>
     </div>
     <div class="card"><h3>Commits Over Time</h3><div class="chart" id="ov-timeline"></div></div>
-    <div class="grid-2">
-      <div class="card"><h3>Top Contributors</h3><div class="chart" id="ov-contribs"></div></div>
-      <div class="card"><h3>Organization Share</h3><div class="chart" id="ov-orgs"></div></div>
-    </div>
-    <div class="grid-2">
-      <div class="card"><h3>Languages</h3><div class="chart" id="ov-langs"></div></div>
-      <div class="card"><h3>Activity Heatmap</h3><div class="chart" id="ov-heat"></div></div>
-    </div>`;
+    <div class="card"><h3>Top Contributors</h3><div class="chart" id="ov-contribs"></div></div>
+    <div class="card"><h3>Organization Share</h3><div class="chart" id="ov-orgs"></div></div>
+    <div class="card"><h3>Languages</h3><div class="chart" id="ov-langs"></div></div>
+    <div class="card"><h3>Activity Heatmap</h3><div class="chart" id="ov-heat"></div></div>`;
   await Promise.all([
     vl('ov-timeline',{height:220,data:{values:timeline},mark:{type:'area',line:true,point:false,opacity:0.7,color:'#58a6ff'},encoding:{x:{field:'month',type:'temporal',title:'Month'},y:{field:'commits',type:'quantitative',title:'Commits'},tooltip:[{field:'month',type:'temporal'},{field:'commits',type:'quantitative'}]}}),
     vl('ov-contribs',{height:400,data:{values:contribs},mark:'bar',encoding:{y:{field:'author',type:'nominal',sort:'-x',title:null},x:{field:'commits',type:'quantitative',title:'Commits'},color:{value:'#58a6ff'},tooltip:[{field:'author',type:'nominal'},{field:'commits',type:'quantitative'},{field:'org',type:'nominal'}]}}),
@@ -302,8 +299,7 @@ async function openIdentity(id) {
   const info = d.info, s = d.stats || {};
   const initials = (info.name||'?').split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase();
 
-  const aliasHtml = d.aliases.length > 1
-    ? `<div class="profile-aliases">${d.aliases.map(a=>`<code>${h(a.email)}</code>`).join(' ')}</div>` : '';
+  const aliasHtml = '';
 
   const tenureDays = s.first_commit && s.last_commit
     ? Math.round((new Date(s.last_commit) - new Date(s.first_commit)) / 86400000) : 0;
@@ -345,6 +341,13 @@ async function openIdentity(id) {
       <div class="stat"><div class="val">${s.last_commit?.slice(0,10)||'—'}</div><div class="lbl">Last Commit</div></div>
     </div>
 
+    <!-- Email addresses -->
+    <!-- Email addresses -->
+    ${d.emails.length ? `<div class="card"><h3>Email Addresses</h3><p class="card-desc">All email addresses and usernames observed in commit author fields and trailers. Dates reflect when commits using each address were committed to the repository — overlaps can occur when in-flight patches land after an address change.</p><div id="ip-emails"></div></div>` : ''}
+
+    <!-- Org history -->
+    ${d.org_history.length ? `<div class="card"><h3>Organization History</h3><p class="card-desc">Organizations derived from commit email domains. Dates reflect when commits attributed to each organization were committed — overlaps can occur when patches authored at a previous organization land after a transition.</p><div id="ip-org-history"></div></div>` : ''}
+
     <!-- Charts row 1: timeline + yearly -->
     <div class="grid-2">
       <div class="card"><h3>Commit Timeline</h3><div class="chart" id="ip-timeline"></div></div>
@@ -361,12 +364,14 @@ async function openIdentity(id) {
     <!-- Subsystems -->
     ${d.subsystems.length ? `<div class="card"><h3>Subsystems</h3><div class="chart" id="ip-subs"></div></div>` : ''}
 
-    <!-- Reviews + Collaborators -->
-    <div class="grid-3">
+    <!-- Reviews -->
+    <div class="grid-2">
       <div class="card"><h3>Reviews Given To</h3><div id="ip-rg"></div></div>
       <div class="card"><h3>Reviews Received From</h3><div id="ip-rr"></div></div>
-      <div class="card"><h3>Collaborators</h3><div id="ip-collab"></div></div>
     </div>
+
+    <!-- Collaborators -->
+    <div class="card"><h3>Collaborators</h3><div id="ip-collab"></div></div>
 
     <!-- File ownership -->
     ${d.files_owned.length ? `<div class="card"><h3>Top Files Owned (blame)</h3><div id="ip-files"></div></div>` : ''}
@@ -396,9 +401,21 @@ async function openIdentity(id) {
   await Promise.all(promises);
 
   // Tables
-  document.getElementById('ip-rg').innerHTML = personTable(d.reviews_given, 'author', 'reviews');
-  document.getElementById('ip-rr').innerHTML = personTable(d.reviews_received, 'reviewer', 'reviews');
-  document.getElementById('ip-collab').innerHTML = personTable(d.collaborators, 'collaborator', 'shared_file_commits', 'org');
+  if (d.emails.length) {
+    let et = '<div style="max-height:40vh;overflow:auto"><table><thead><tr><th>Email / Username</th><th>First Seen</th><th>Last Seen</th><th class="num">Commits</th><th class="num">Trailers</th></tr></thead><tbody>';
+    for (const e of d.emails) et += `<tr><td class="mono">${h(e.email)}</td><td>${e.first_seen?.slice(0,10)||'—'}</td><td>${e.last_seen?.slice(0,10)||'—'}</td><td class="num">${fmt(e.commit_count)}</td><td class="num">${fmt(e.trailer_count)}</td></tr>`;
+    document.getElementById('ip-emails').innerHTML = et + '</tbody></table></div>';
+  }
+
+  if (d.org_history.length) {
+    let ot = '<div style="max-height:40vh;overflow:auto"><table><thead><tr><th>Organization</th><th>First Seen</th><th>Last Seen</th><th class="num">Commits</th></tr></thead><tbody>';
+    for (const o of d.org_history) ot += `<tr><td class="clickable" onclick="openOrg('${ea(o.org)}')">${h(o.org)}</td><td>${o.first_seen?.slice(0,10)||'—'}</td><td>${o.last_seen?.slice(0,10)||'—'}</td><td class="num">${fmt(o.commits)}</td></tr>`;
+    document.getElementById('ip-org-history').innerHTML = ot + '</tbody></table></div>';
+  }
+
+  document.getElementById('ip-rg').innerHTML = reviewTable(d.reviews_given, 'author', 'reviews');
+  document.getElementById('ip-rr').innerHTML = reviewTable(d.reviews_received, 'reviewer', 'reviews');
+  document.getElementById('ip-collab').innerHTML = collabTable(d.collaborators);
 
   if (d.files_owned.length) {
     let ft = '<div style="max-height:40vh;overflow:auto"><table><thead><tr><th>Path</th><th class="num">Lines</th><th class="num">%</th></tr></thead><tbody>';
@@ -411,12 +428,21 @@ async function openIdentity(id) {
   document.getElementById('ip-commits').innerHTML = ct + '</tbody></table></div>';
 }
 
-function personTable(data, nameField, countField, orgField) {
+function reviewTable(data, nameField, countField) {
   if (!data || !data.length) return '<p style="color:var(--text2);font-size:0.85rem">None</p>';
-  let t = '<div style="max-height:30vh;overflow:auto"><table><tbody>';
+  let t = '<div style="max-height:50vh;overflow:auto"><table><thead><tr><th>Name</th><th class="num">Reviews</th></tr></thead><tbody>';
   for (const r of data) {
-    const org = orgField && r[orgField] ? ` <span class="tag org clickable" style="font-size:0.65rem" onclick="openOrg('${ea(r[orgField])}')">${h(r[orgField])}</span>` : '';
-    t += `<tr><td class="clickable" onclick="openIdentityByName('${ea(r[nameField])}')" style="font-size:0.85rem">${h(r[nameField])}${org}</td><td class="num" style="font-size:0.85rem">${fmt(r[countField])}</td></tr>`;
+    t += `<tr><td class="clickable" onclick="openIdentityByName('${ea(r[nameField])}')">${h(r[nameField])}</td><td class="num">${fmt(r[countField])}</td></tr>`;
+  }
+  return t + '</tbody></table></div>';
+}
+
+function collabTable(data) {
+  if (!data || !data.length) return '<p style="color:var(--text2);font-size:0.85rem">None</p>';
+  let t = '<div style="max-height:50vh;overflow:auto"><table><thead><tr><th>Name</th><th>Org</th><th class="num">Shared File Commits</th></tr></thead><tbody>';
+  for (const r of data) {
+    const org = r.org ? `<span class="tag org clickable" onclick="openOrg('${ea(r.org)}')">${h(r.org)}</span>` : '';
+    t += `<tr><td class="clickable" onclick="openIdentityByName('${ea(r.collaborator)}')">${h(r.collaborator)}</td><td>${org}</td><td class="num">${fmt(r.shared_file_commits)}</td></tr>`;
   }
   return t + '</tbody></table></div>';
 }

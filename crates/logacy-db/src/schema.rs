@@ -47,8 +47,6 @@ diesel::table! {
         id -> Integer,
         org_id -> Integer,
         domain -> Text,
-        valid_from -> Nullable<Text>,
-        valid_until -> Nullable<Text>,
     }
 }
 
@@ -57,8 +55,6 @@ diesel::table! {
         id -> Integer,
         identity_id -> Integer,
         org_id -> Integer,
-        valid_from -> Nullable<Text>,
-        valid_until -> Nullable<Text>,
         source -> Text,
     }
 }
@@ -189,7 +185,6 @@ diesel::table! {
         source -> Text,
         matched_email -> Nullable<Text>,
         matched_domain -> Nullable<Text>,
-        matched_rule_id -> Nullable<Integer>,
     }
 }
 
@@ -203,7 +198,6 @@ diesel::table! {
         source -> Text,
         matched_email -> Nullable<Text>,
         matched_domain -> Nullable<Text>,
-        matched_rule_id -> Nullable<Integer>,
     }
 }
 

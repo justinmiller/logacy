@@ -111,8 +111,6 @@ pub struct OrgDomain {
     #[serde(default, deserialize_with = "string_or_vec")]
     pub domains: Vec<String>,
     pub org: String,
-    pub from: Option<String>,
-    pub until: Option<String>,
 }
 
 impl OrgDomain {

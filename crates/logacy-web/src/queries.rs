@@ -7,8 +7,9 @@ use diesel::sqlite::SqliteConnection;
 use serde_json::{json, Value};
 
 use logacy_db::schema::{
-    blame_hunks, commit_files, commit_releases, commits, file_ownership, file_subsystems,
-    identities, identity_affiliations, identity_aliases, organizations, subsystems, tags, trailers,
+    blame_hunks, commit_files, commit_org_attribution, commit_releases, commits, file_ownership,
+    file_subsystems, identities, identity_affiliations, identity_aliases, identity_emails,
+    organizations, subsystems, tags, trailers,
     v_commits, v_identity_org, v_reviews,
 };
 
@@ -61,27 +62,75 @@ fn latest_snapshot(conn: &mut SqliteConnection) -> Result<Option<i32>, StatusCod
         .map_err(db_error)
 }
 
-/// Load a mapping of identity_id → current org name from the v_identity_org view.
-fn load_identity_orgs(conn: &mut SqliteConnection) -> Result<HashMap<i32, String>, StatusCode> {
-    let rows = v_identity_org::table
-        .select((v_identity_org::identity_id, v_identity_org::org))
-        .load::<(i32, Option<String>)>(conn)
-        .map_err(db_error)?;
-    Ok(rows
-        .into_iter()
-        .filter_map(|(id, org)| org.map(|o| (id, o)))
-        .collect())
+/// Consolidated identity display info: preferred (most recent) email and latest org per identity.
+/// All code that displays an identity's email or org should use this instead of
+/// canonical_email or the v_identity_org view directly.
+struct IdentityDisplayInfo {
+    preferred_emails: HashMap<i32, String>,
+    latest_orgs: HashMap<i32, String>,
 }
 
-/// Load current org for a specific identity.
-fn load_identity_org(conn: &mut SqliteConnection, id: i32) -> Result<Option<String>, StatusCode> {
-    v_identity_org::table
-        .filter(v_identity_org::identity_id.eq(id))
-        .select(v_identity_org::org)
-        .first::<Option<String>>(conn)
-        .optional()
-        .map_err(db_error)
-        .map(|opt| opt.flatten())
+impl IdentityDisplayInfo {
+    fn load(conn: &mut SqliteConnection) -> Result<Self, StatusCode> {
+        let preferred_emails = identity_emails::table
+            .filter(identity_emails::is_preferred.eq(1))
+            .select((identity_emails::identity_id, identity_emails::email))
+            .load::<(i32, String)>(conn)
+            .map_err(db_error)?
+            .into_iter()
+            .collect();
+
+        // Latest org: from most recent commit's org attribution per identity,
+        // falling back to v_identity_org view.
+        let mut latest_orgs = HashMap::<i32, String>::new();
+
+        // First, populate fallback from v_identity_org
+        for (id, org) in v_identity_org::table
+            .select((v_identity_org::identity_id, v_identity_org::org))
+            .load::<(i32, Option<String>)>(conn)
+            .map_err(db_error)?
+        {
+            if let Some(org) = org {
+                latest_orgs.insert(id, org);
+            }
+        }
+
+        // Then override with most-recent-commit org attribution
+        let rows = commit_org_attribution::table
+            .inner_join(commits::table.on(commits::hash.eq(commit_org_attribution::commit_hash)))
+            .filter(commits::author_id.is_not_null())
+            .filter(commit_org_attribution::org_name.is_not_null())
+            .select((commits::author_id, commit_org_attribution::org_name, commits::author_date))
+            .load::<(Option<i32>, Option<String>, String)>(conn)
+            .map_err(db_error)?;
+        let mut best_dates: HashMap<i32, String> = HashMap::new();
+        for (author_id, org_name, date) in rows {
+            if let (Some(id), Some(org)) = (author_id, org_name) {
+                let is_newer = best_dates.get(&id).map_or(true, |d| date > *d);
+                if is_newer {
+                    best_dates.insert(id, date);
+                    latest_orgs.insert(id, org);
+                }
+            }
+        }
+
+        Ok(Self { preferred_emails, latest_orgs })
+    }
+
+    /// Get the display email for an identity (preferred/most-recent, or fallback).
+    fn email(&self, id: i32, fallback: &str) -> String {
+        self.preferred_emails.get(&id).cloned().unwrap_or_else(|| fallback.to_string())
+    }
+
+    /// Get the display org for an identity.
+    fn org(&self, id: i32) -> String {
+        self.latest_orgs.get(&id).cloned().unwrap_or_default()
+    }
+
+    /// Get the display org with a custom default.
+    fn org_or(&self, id: i32, default: &str) -> String {
+        self.latest_orgs.get(&id).cloned().unwrap_or_else(|| default.to_string())
+    }
 }
 
 /// Load identity IDs belonging to a given org.
@@ -485,7 +534,7 @@ pub fn ownership(conn: &mut SqliteConnection) -> Result<Value, StatusCode> {
     let Some(snapshot_id) = latest_snapshot(conn)? else {
         return Err(StatusCode::NOT_FOUND);
     };
-    let identity_orgs = load_identity_orgs(conn)?;
+    let display = IdentityDisplayInfo::load(conn)?;
 
     let rows = file_ownership::table
         .inner_join(identities::table)
@@ -501,10 +550,7 @@ pub fn ownership(conn: &mut SqliteConnection) -> Result<Value, StatusCode> {
 
     let mut grouped = HashMap::<i32, (String, String, i64)>::new();
     for (id, author, lines_owned) in rows {
-        let org = identity_orgs
-            .get(&id)
-            .cloned()
-            .unwrap_or_else(|| "Unknown".to_string());
+        let org = display.org_or(id, "Unknown");
         let entry = grouped.entry(id).or_insert_with(|| (author, org, 0));
         entry.2 += i64::from(lines_owned);
     }
@@ -700,7 +746,7 @@ pub fn identities_summary(conn: &mut SqliteConnection, params: &Params) -> Resul
         .get_result::<i64>(conn)
         .map_err(db_error)?;
 
-    let identity_orgs = load_identity_orgs(conn)?;
+    let display = IdentityDisplayInfo::load(conn)?;
 
     let mut commit_query = commits::table.inner_join(identities::table).into_boxed();
     if let Some(ref since) = params.since {
@@ -722,7 +768,7 @@ pub fn identities_summary(conn: &mut SqliteConnection, params: &Params) -> Resul
             identities_set.insert(author_id);
             if is_bot == 1 {
                 bots_set.insert(author_id);
-            } else if identity_orgs.contains_key(&author_id) {
+            } else if display.latest_orgs.contains_key(&author_id) {
                 with_org_set.insert(author_id);
             }
         }
@@ -768,7 +814,7 @@ pub fn identities_summary(conn: &mut SqliteConnection, params: &Params) -> Resul
 
 pub fn identities_list(conn: &mut SqliteConnection, params: &Params) -> Result<Value, StatusCode> {
     let search = params.search.as_deref().map(lower);
-    let identity_orgs = load_identity_orgs(conn)?;
+    let display = IdentityDisplayInfo::load(conn)?;
 
     let identities_rows = identities::table
         .select((
@@ -835,21 +881,22 @@ pub fn identities_list(conn: &mut SqliteConnection, params: &Params) -> Result<V
         .into_iter()
         .filter(|(id, name, email, _)| {
             if let Some(ref search) = search {
-                let org = identity_orgs.get(id).map(|s| s.as_str()).unwrap_or("");
+                let org = display.org(*id);
                 contains_ci(name, search)
                     || contains_ci(email, search)
-                    || contains_ci(org, search)
+                    || contains_ci(&org, search)
             } else {
                 true
             }
         })
         .map(|(id, name, email, bot)| {
-            let org = identity_orgs.get(&id).cloned().unwrap_or_default();
+            let display_email = display.email(id, &email);
+            let org = display.org(id);
             let alias_emails = aliases.get(&id).cloned().unwrap_or_default();
             json!({
                 "id": id,
                 "name": name,
-                "email": email,
+                "email": display_email,
                 "org": org,
                 "bot": bot,
                 "aliases": alias_emails.len(),
@@ -874,7 +921,7 @@ pub fn identities_list(conn: &mut SqliteConnection, params: &Params) -> Result<V
 }
 
 pub fn identities_orgs(conn: &mut SqliteConnection, params: &Params) -> Result<Value, StatusCode> {
-    let identity_orgs = load_identity_orgs(conn)?;
+    let display = IdentityDisplayInfo::load(conn)?;
 
     let mut query = commits::table.inner_join(identities::table).into_boxed();
     if let Some(ref since) = params.since {
@@ -890,10 +937,7 @@ pub fn identities_orgs(conn: &mut SqliteConnection, params: &Params) -> Result<V
 
     let mut grouped = HashMap::<String, (HashSet<i32>, HashSet<i32>)>::new();
     for (id, is_bot) in rows {
-        let org = identity_orgs
-            .get(&id)
-            .cloned()
-            .unwrap_or_else(|| "Unaffiliated".to_string());
+        let org = display.org_or(id, "Unaffiliated");
         let entry = grouped.entry(org).or_default();
         entry.0.insert(id);
         if is_bot == 0 {
@@ -973,6 +1017,7 @@ pub fn identities_unresolved(conn: &mut SqliteConnection, params: &Params) -> Re
 }
 
 pub fn identities_bots(conn: &mut SqliteConnection, params: &Params) -> Result<Value, StatusCode> {
+    let display = IdentityDisplayInfo::load(conn)?;
     let bots = identities::table
         .filter(identities::is_bot.eq(1))
         .select((identities::id, identities::canonical_name, identities::canonical_email))
@@ -1029,7 +1074,7 @@ pub fn identities_bots(conn: &mut SqliteConnection, params: &Params) -> Result<V
         .map(|(id, name, email)| {
             json!({
                 "name": name,
-                "email": email,
+                "email": display.email(id, &email),
                 "commits": commit_counts.get(&id).copied().unwrap_or_default(),
                 "trailer_mentions": trailer_counts.get(&id).copied().unwrap_or_default(),
             })
@@ -1040,7 +1085,7 @@ pub fn identities_bots(conn: &mut SqliteConnection, params: &Params) -> Result<V
 }
 
 pub fn identities_multi_alias(conn: &mut SqliteConnection) -> Result<Value, StatusCode> {
-    let identity_orgs = load_identity_orgs(conn)?;
+    let display = IdentityDisplayInfo::load(conn)?;
 
     let humans = identities::table
         .filter(identities::is_bot.eq(0))
@@ -1070,10 +1115,10 @@ pub fn identities_multi_alias(conn: &mut SqliteConnection) -> Result<Value, Stat
             if alias_emails.len() <= 1 {
                 return None;
             }
-            let org = identity_orgs.get(&id).cloned().unwrap_or_default();
+            let org = display.org(id);
             Some(json!({
                 "name": name,
-                "email": email,
+                "email": display.email(id, &email),
                 "org": org,
                 "alias_count": alias_emails.len() as i64,
                 "all_emails": alias_emails.join(", "),
@@ -1102,7 +1147,9 @@ pub fn identity_profile(conn: &mut SqliteConnection, params: &Params) -> Result<
         .map_err(db_error)?
         .ok_or(StatusCode::NOT_FOUND)?;
     let canonical_name = info.1.clone();
-    let identity_org = load_identity_org(conn, id)?.unwrap_or_default();
+    let display = IdentityDisplayInfo::load(conn)?;
+    let display_email = display.email(id, &info.2);
+    let identity_org = display.org(id);
 
     let aliases = identity_aliases::table
         .filter(identity_aliases::identity_id.eq(id))
@@ -1110,6 +1157,56 @@ pub fn identity_profile(conn: &mut SqliteConnection, params: &Params) -> Result<
         .select((identity_aliases::name, identity_aliases::email))
         .load::<(Option<String>, String)>(conn)
         .map_err(db_error)?;
+
+    let emails = identity_emails::table
+        .filter(identity_emails::identity_id.eq(id))
+        .order(identity_emails::last_seen_at.desc())
+        .select((
+            identity_emails::email,
+            identity_emails::first_seen_at,
+            identity_emails::last_seen_at,
+            identity_emails::commit_count,
+            identity_emails::trailer_count,
+        ))
+        .load::<(String, Option<String>, Option<String>, i32, i32)>(conn)
+        .map_err(db_error)?;
+
+    // Org history: all orgs this identity has been associated with, with date ranges
+    let org_history = commit_org_attribution::table
+        .inner_join(commits::table.on(commits::hash.eq(commit_org_attribution::commit_hash)))
+        .filter(commits::author_id.eq(Some(id)))
+        .filter(commit_org_attribution::org_name.is_not_null())
+        .select((
+            commit_org_attribution::org_name,
+            commits::commit_date,
+        ))
+        .load::<(Option<String>, String)>(conn)
+        .map_err(db_error)?;
+    let mut org_history_map: HashMap<String, (String, String, i64)> = HashMap::new();
+    for (org_name, date) in org_history {
+        if let Some(org) = org_name {
+            let entry = org_history_map
+                .entry(org)
+                .or_insert_with(|| (date.clone(), date.clone(), 0));
+            if date < entry.0 {
+                entry.0 = date.clone();
+            }
+            if date > entry.1 {
+                entry.1 = date.clone();
+            }
+            entry.2 += 1;
+        }
+    }
+    let mut org_history_rows: Vec<_> = org_history_map
+        .into_iter()
+        .map(|(org, (first, last, commits))| json!({
+            "org": org,
+            "first_seen": first,
+            "last_seen": last,
+            "commits": commits,
+        }))
+        .collect();
+    org_history_rows.sort_by(|a, b| b["last_seen"].as_str().cmp(&a["last_seen"].as_str()));
 
     let mut commit_query = commits::table.filter(commits::author_id.eq(Some(id))).into_boxed();
     if let Some(ref since) = params.since {
@@ -1406,20 +1503,18 @@ pub fn identity_profile(conn: &mut SqliteConnection, params: &Params) -> Result<
     if let Some(ref until) = params.until {
         review_given_query = review_given_query.filter(v_reviews::author_date.lt(until));
     }
-    let mut reviews_given_map = HashMap::<(String, String), i64>::new();
-    for (author, author_org) in review_given_query
-        .select((v_reviews::author, v_reviews::author_org))
-        .load::<(String, Option<String>)>(conn)
+    let mut reviews_given_counts = HashMap::<String, i64>::new();
+    for author in review_given_query
+        .select(v_reviews::author)
+        .load::<String>(conn)
         .map_err(db_error)?
     {
-        *reviews_given_map
-            .entry((author, author_org.unwrap_or_default()))
-            .or_default() += 1;
+        *reviews_given_counts.entry(author).or_default() += 1;
     }
-    let mut reviews_given = reviews_given_map
+    let mut reviews_given = reviews_given_counts
         .into_iter()
-        .map(|((author, author_org), reviews)| {
-            json!({ "author": author, "author_org": author_org, "reviews": reviews })
+        .map(|(author, reviews)| {
+            json!({ "author": author, "reviews": reviews })
         })
         .collect::<Vec<_>>();
     reviews_given.sort_by(|a, b| b["reviews"].as_i64().cmp(&a["reviews"].as_i64()));
@@ -1434,26 +1529,23 @@ pub fn identity_profile(conn: &mut SqliteConnection, params: &Params) -> Result<
     if let Some(ref until) = params.until {
         review_received_query = review_received_query.filter(v_reviews::author_date.lt(until));
     }
-    let mut reviews_received_map = HashMap::<(String, String), i64>::new();
-    for (reviewer, reviewer_org) in review_received_query
-        .select((v_reviews::reviewer, v_reviews::reviewer_org))
-        .load::<(String, Option<String>)>(conn)
+    let mut reviews_received_counts = HashMap::<String, i64>::new();
+    for reviewer in review_received_query
+        .select(v_reviews::reviewer)
+        .load::<String>(conn)
         .map_err(db_error)?
     {
-        *reviews_received_map
-            .entry((reviewer, reviewer_org.unwrap_or_default()))
-            .or_default() += 1;
+        *reviews_received_counts.entry(reviewer).or_default() += 1;
     }
-    let mut reviews_received = reviews_received_map
+    let mut reviews_received = reviews_received_counts
         .into_iter()
-        .map(|((reviewer, reviewer_org), reviews)| {
-            json!({ "reviewer": reviewer, "reviewer_org": reviewer_org, "reviews": reviews })
+        .map(|(reviewer, reviews)| {
+            json!({ "reviewer": reviewer, "reviews": reviews })
         })
         .collect::<Vec<_>>();
     reviews_received.sort_by(|a, b| b["reviews"].as_i64().cmp(&a["reviews"].as_i64()));
     reviews_received.truncate(15);
 
-    let identity_orgs = load_identity_orgs(conn)?;
     let own_paths = commit_files::table
         .inner_join(commits::table)
         .filter(commits::author_id.eq(Some(id)))
@@ -1490,10 +1582,7 @@ pub fn identity_profile(conn: &mut SqliteConnection, params: &Params) -> Result<
             .map_err(db_error)?;
         let mut grouped = HashMap::<i32, (String, String, HashSet<String>)>::new();
         for (other_id, collaborator, commit_hash) in rows {
-            let org = identity_orgs
-                .get(&other_id)
-                .cloned()
-                .unwrap_or_default();
+            let org = display.org(other_id);
             let entry = grouped
                 .entry(other_id)
                 .or_insert_with(|| (collaborator, org, HashSet::new()));
@@ -1522,11 +1611,19 @@ pub fn identity_profile(conn: &mut SqliteConnection, params: &Params) -> Result<
         "info": {
             "id": info.0,
             "name": info.1,
-            "email": info.2,
+            "email": display_email,
             "org": identity_org,
             "bot": info.3,
         },
         "aliases": aliases.into_iter().map(|(name, email)| json!({ "name": name, "email": email })).collect::<Vec<_>>(),
+        "emails": emails.into_iter().map(|(email, first_seen, last_seen, commit_count, trailer_count)| json!({
+            "email": email,
+            "first_seen": first_seen,
+            "last_seen": last_seen,
+            "commit_count": commit_count,
+            "trailer_count": trailer_count,
+        })).collect::<Vec<_>>(),
+        "org_history": org_history_rows,
         "stats": stats,
         "timeline": timeline.into_iter().map(|(month, commits)| json!({ "month": month, "commits": commits })).collect::<Vec<_>>(),
         "languages": languages,
@@ -1908,6 +2005,7 @@ pub fn org_profile(conn: &mut SqliteConnection, params: &Params) -> Result<Value
     let org = params.org.as_deref().ok_or(StatusCode::BAD_REQUEST)?;
     let org_value = org.to_string();
 
+    let display = IdentityDisplayInfo::load(conn)?;
     let member_ids = load_org_member_ids(conn, org)?;
     if member_ids.is_empty() {
         return Ok(json!({
@@ -2015,7 +2113,7 @@ pub fn org_profile(conn: &mut SqliteConnection, params: &Params) -> Result<Value
             json!({
                 "id": id,
                 "name": name,
-                "email": email,
+                "email": display.email(id, &email),
                 "bot": bot,
                 "commits": stats.0,
                 "insertions": stats.1,
