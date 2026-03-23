@@ -1,21 +1,26 @@
 # logacy
 
 A single Rust binary that materializes git history into a queryable SQLite
-database — commits, identities, file-level diffs, trailers, subsystem mappings,
-and line-level blame — then generates self-contained HTML reports with
-interactive charts.
+database — commits, identities, file-level diffs, diff hunks, trailers,
+subsystem mappings, tags/releases, org attribution, and hunk-based blame — then
+generates self-contained HTML reports with interactive charts or serves an
+interactive web UI.
 
 logacy reads a git repository and writes structured, queryable data to a
 local SQLite database. It parses commits, resolves contributor identities
-across aliases and organizations via `.mailmap`, extracts ticket references and
-component tags from commit subjects, computes per-file diff statistics, indexes
-commit trailers (Reviewed-by, Signed-off-by, Tested-by, etc.), parses
-MAINTAINERS files to map files to subsystems, and runs parallel git blame to
-compute code ownership snapshots.
+across aliases and organizations via `.mailmap` and explicit config aliases,
+extracts ticket references and component tags from commit subjects, computes
+per-file diff statistics and per-hunk line ranges, indexes commit trailers
+(Reviewed-by, Signed-off-by, Tested-by, etc.) with parsed identity fields,
+parses MAINTAINERS files to map files to subsystems, indexes tags and maps
+commits to releases, computes per-commit and per-trailer org attribution via
+temporal domain rules, and runs parallel git blame to compute hunk-based code
+ownership snapshots.
 
 The database is the primary output. Query it with `logacy query`, `sqlite3`,
-DuckDB, Jupyter, Grafana, or any SQLite-compatible tool. Or generate
-self-contained HTML reports with embedded Vega-Lite charts.
+DuckDB, Jupyter, Grafana, or any SQLite-compatible tool. Generate
+self-contained HTML reports with embedded Vega-Lite charts, or launch an
+interactive web UI with `logacy serve`.
 
 ## Quick Start
 
@@ -29,6 +34,7 @@ logacy identity
 logacy maintain          # if repo has a MAINTAINERS file
 logacy blame
 logacy report --all
+logacy serve             # interactive web UI at http://127.0.0.1:3000
 logacy query "SELECT count(*) FROM commits"
 ```
 
@@ -56,25 +62,27 @@ logacy/
   crates/
     logacy-cli/              # binary entry point, clap CLI
     logacy-core/             # shared types, config loading
-    logacy-db/               # schema, migrations, query helpers
-    logacy-index/            # commit/trailer/identity materialization
-    logacy-blame/            # git blame engine (parallel, via git2)
+    logacy-db/               # schema, migrations, Diesel ORM layer
+    logacy-index/            # commit/trailer/identity/tag materialization
+    logacy-blame/            # git blame engine (parallel, hunk-based)
     logacy-maintain/         # MAINTAINERS parser, subsystem mapping
     logacy-report/           # HTML report generation (Vega-Lite)
+    logacy-web/              # interactive web UI (axum + Vega-Lite SPA)
 ```
 
 ### Key Dependencies
 
 | Crate | Purpose |
 |-------|---------|
-| `gix` (gitoxide) | Commit walking, tree diffs, mailmap parsing |
-| `git2` (libgit2) | Blame (mature rename/copy tracking) |
+| `gix` (gitoxide) | Commit walking, tree diffs, mailmap parsing, hunk-level diff |
 | `rusqlite` | Embedded SQLite (bundled, no system dependency) |
+| `diesel` | Typed ORM queries for the web UI |
+| `axum` + `tokio` | Async web server for `logacy serve` |
+| `tower-http` | CORS middleware for the web UI |
 | `clap` | CLI argument parsing with derive macros |
 | `regex` | Ticket/component extraction from commit subjects |
 | `rayon` | Parallel blame execution |
 | `glob` | MAINTAINERS file pattern matching |
-| `minijinja` | HTML report templating |
 | `comfy-table` | Terminal table output |
 | `indicatif` | Progress bars during indexing |
 | `chrono` | Datetime handling |
@@ -96,7 +104,8 @@ logacy init --force    # overwrites existing database
 ### `logacy index`
 
 Materializes git history into the database. Walks commits from HEAD, extracts
-metadata, parses trailers, and computes per-file diff statistics.
+metadata, parses trailers, computes per-file diff statistics and per-hunk line
+ranges, and indexes tags with commit-to-release mapping.
 
 ```sh
 logacy index           # incremental (only new commits since last run)
@@ -109,18 +118,25 @@ logacy index --all     # follow all commits, not just first-parent
 - Commit metadata: hash, author, committer, dates, subject, body
 - Ticket and component extraction from commit subjects (configurable regex)
 - Commit trailers: Signed-off-by, Reviewed-by, Tested-by, Change-Id, etc.
+  with parsed name/email fields for identity trailers
 - Per-file diff statistics: path, status (A/M/D/R), insertions, deletions
+- Per-hunk diff ranges: old_start/old_lines, new_start/new_lines for each
+  contiguous change region in each file
 - File classification: language (from extension/filename) and category
   (source, test, docs, build — from path heuristics)
 - Aggregate insertions/deletions per commit
+- Tags: lightweight and annotated, with tagger metadata and annotations
+- Commit-to-release mapping: each commit is assigned to its containing release
+  tag (configurable tag pattern)
 
 **Incremental indexing** is the default. logacy records `last_indexed_commit`
 and on subsequent runs only processes commits between HEAD and that marker.
 
 ### `logacy identity`
 
-Resolves contributor identities by importing `.mailmap`, merging aliases, and
-backfilling foreign keys across the database.
+Resolves contributor identities by importing `.mailmap`, applying explicit
+config aliases, merging aliases, and backfilling foreign keys across the
+database. Also computes org attribution for commits and trailers.
 
 ```sh
 logacy identity
@@ -129,14 +145,17 @@ logacy identity
 **Resolution pipeline:**
 
 1. Collects all distinct (name, email) pairs from commits and identity trailers
-2. Resolves each pair through `.mailmap` to canonical (name, email)
-3. Merges identities sharing the same canonical name across different emails
+2. Applies explicit aliases from config (merges multiple emails into one identity)
+3. Resolves each pair through `.mailmap` to canonical (name, email)
+4. Merges identities sharing the same canonical name across different emails
    (handles employer changes: e.g., `user@sun.com` and `user@oracle.com`)
-4. Picks the most recently used email as the canonical email
-5. Marks bots from configured email/name patterns
-6. Backfills `author_id` and `committer_id` on all commits
-7. Resolves `identity_id` on identity trailers (Signed-off-by, Reviewed-by, etc.)
-8. Loads temporal org-domain mappings from config
+5. Picks the most recently used email as the canonical email
+6. Tracks all emails per identity with first/last seen dates and commit/trailer counts
+7. Marks bots from configured email/name patterns
+8. Backfills `author_id` and `committer_id` on all commits
+9. Resolves `identity_id` on identity trailers (Signed-off-by, Reviewed-by, etc.)
+10. Loads temporal org-domain mappings and org overrides from config
+11. Computes per-commit and per-trailer org attribution via domain rules
 
 ### `logacy maintain`
 
@@ -159,7 +178,7 @@ logacy maintain
 
 ### `logacy blame`
 
-Computes git blame snapshots for all files at HEAD, producing line-level
+Computes git blame snapshots for all files at HEAD, producing hunk-based
 attribution and aggregated code ownership fractions.
 
 ```sh
@@ -168,12 +187,14 @@ logacy blame
 
 **How it works:**
 
-- Uses `git2` (libgit2) for blame — mature rename/copy tracking
-- Parallel execution via rayon (each thread opens its own `git2::Repository`)
+- Uses `git blame --porcelain` via the git CLI for blame computation
+- Parallel execution via rayon
+- Stores blame as contiguous hunks (`blame_hunks`) rather than individual lines,
+  with identity resolution via an in-memory cache
 - Filters out files matching `exclude_paths` globs, `binary_extensions`, or
   exceeding `max_file_size`
 - Idempotent: skips if a snapshot already exists for the HEAD commit
-- Produces `blame_lines` (per-line attribution) and `file_ownership`
+- Produces `blame_hunks` (hunk-level attribution) and `file_ownership`
   (aggregated lines/fraction per identity per file)
 
 ### `logacy report`
@@ -182,7 +203,7 @@ Generates self-contained HTML reports with embedded Vega-Lite charts. All
 JavaScript is bundled into the binary — no CDN or network requests required.
 
 ```sh
-logacy report --all                          # generate all 5 reports
+logacy report --all                          # generate all reports
 logacy report --template overview            # single report
 logacy report --template contributors --since 2024-01-01
 logacy report --output /tmp/reports --all    # custom output directory
@@ -195,10 +216,27 @@ logacy report --output /tmp/reports --all    # custom output directory
 | `overview` | Project dashboard: commits over time, top contributors, org share, subsystem breakdown, language distribution, work type breakdown, commit activity heatmap |
 | `contributors` | Per-author detail: commit counts, review counts, subsystem involvement, tenure, language profile |
 | `subsystems` | Per-subsystem health: activity, contributor count, reviewer coverage, bus factor, dormant subsystem detection, unmapped files, maintainer summary |
-| `reviews` | Review network: who reviews whom, review counts, cross-org patterns |
+| `reviews` | Review network: who reviews whom, review counts, cross-org patterns, with optional ticket URL linking |
 | `ownership` | Blame-based ownership: lines by author/org/subsystem, code age distribution |
+| `files` | File-level analytics: most changed files, language breakdown, category distribution |
+| `identities` | Identity resolution detail: canonical names, aliases, email history, org affiliations |
+| `releases` | Release history: commits per release, release cadence, contributors per release |
+| `hotspots` | Change hotspot analysis: fragmented files, complexity vs churn, most-touched line regions, hunk size distribution, contributor dispersion |
 
 Reports are written to `.logacy/reports/` by default (one HTML file per template).
+
+### `logacy serve`
+
+Starts an interactive web UI with live charts and filterable data.
+
+```sh
+logacy serve                            # default: http://127.0.0.1:3000
+logacy serve --bind 0.0.0.0:8080       # custom bind address
+logacy serve --url https://github.com/owner/repo  # commit link base URL
+```
+
+The web UI is a single-page app served from the binary with a JSON API backend.
+It includes all report sections plus interactive filtering by date range.
 
 ### `logacy query`
 
@@ -260,6 +298,8 @@ All sections are optional; sensible defaults are applied.
 ticket_pattern = 'LU-(\d+)'
 # Regex with capture group to extract component from commit subject
 component_pattern = 'LU-\d+\s+([^:]+):'
+# URL template for linking tickets in reports (use {ticket} as placeholder)
+ticket_url = 'https://jira.example.com/browse/LU-{ticket}'
 
 [trailers]
 # Trailers representing people (get identity_id resolved)
@@ -271,6 +311,17 @@ metadata_keys = ["Change-Id", "Reviewed-on", "Test-Parameters", "Fixes"]
 mailmap = true  # import .mailmap (default: true)
 bot_emails = ["ci@example.com"]
 bot_names = ["jenkins"]
+
+# Explicit identity aliases (supplements .mailmap)
+[[identity.aliases]]
+name = "Jane Doe"
+emails = ["jane@oldcompany.com", "jane@newcompany.com"]
+org = "New Company"
+
+# Direct org assignment for identities not resolvable by email domain
+[[identity.org_overrides]]
+email = "contributor@gmail.com"
+org = "Acme Corp"
 
 # Temporal org-domain mapping (handles acquisitions)
 [[identity.orgs]]
@@ -301,6 +352,10 @@ format = "linux"           # parser format
 exclude_paths = ["**/*.am", "**/Makefile"]
 max_file_size = 1_048_576  # skip files larger than 1MB
 binary_extensions = [".o", ".so", ".png", ".jpg"]
+
+[releases]
+tag_pattern = "v*"         # glob pattern to filter tags
+map_commits = true         # map each commit to its containing release (default)
 ```
 
 ## Database Schema
@@ -341,6 +396,8 @@ use `INSERT OR IGNORE` semantics for idempotent reindexing.
 | `value` | TEXT | Trailer value (e.g., "Jane Doe \<jane@example.com\>") |
 | `identity_id` | INTEGER FK | Resolved identity for identity trailers |
 | `seq` | INTEGER | Order within commit |
+| `parsed_name` | TEXT | Extracted name from identity trailer value |
+| `parsed_email` | TEXT | Extracted email from identity trailer value |
 
 **`commit_files`** — Per-file diff statistics for each commit.
 
@@ -354,6 +411,18 @@ use `INSERT OR IGNORE` semantics for idempotent reindexing.
 | `language` | TEXT | Detected language (e.g., C, Python, Rust, Shell, Other) |
 | `category` | TEXT | File category: source, test, docs, or build |
 
+**`commit_hunks`** — Per-hunk diff ranges for each file in each commit.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `commit_hash` | TEXT FK | References commits(hash) |
+| `path` | TEXT | File path |
+| `old_start` | INTEGER | Start line in the old file (1-based) |
+| `old_lines` | INTEGER | Number of lines in old side of hunk |
+| `new_start` | INTEGER | Start line in the new file (1-based) |
+| `new_lines` | INTEGER | Number of lines in new side of hunk |
+| `seq` | INTEGER | Hunk order within the file |
+
 **`identities`** — Canonical contributor identities.
 
 | Column | Type | Description |
@@ -362,7 +431,6 @@ use `INSERT OR IGNORE` semantics for idempotent reindexing.
 | `canonical_name` | TEXT | Resolved display name |
 | `canonical_email` | TEXT | Resolved email (most recently used) |
 | `is_bot` | INTEGER | 1 if bot account |
-| `org` | TEXT | Organization |
 
 **`identity_aliases`** — Maps raw emails to canonical identities.
 
@@ -372,14 +440,94 @@ use `INSERT OR IGNORE` semantics for idempotent reindexing.
 | `name` | TEXT | Raw name variant |
 | `email` | TEXT PK | Raw email (lookup key) |
 
-**`org_domains`** — Temporal organization mapping for email domains.
+**`identity_emails`** — Tracks all email addresses per identity with usage metadata.
 
 | Column | Type | Description |
 |--------|------|-------------|
+| `identity_id` | INTEGER FK | References identities(id) |
+| `email` | TEXT | Email address |
+| `first_seen_at` | TEXT | Earliest commit/trailer date using this email |
+| `last_seen_at` | TEXT | Latest commit/trailer date using this email |
+| `commit_count` | INTEGER | Number of commits authored with this email |
+| `trailer_count` | INTEGER | Number of trailer appearances with this email |
+| `source` | TEXT | How this email was discovered (commit, trailer, alias) |
+| `is_preferred` | INTEGER | 1 if this is the canonical email |
+
+**`organizations`** — Known organizations.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | INTEGER PK | Organization ID |
+| `name` | TEXT UNIQUE | Organization name |
+
+**`org_domain_rules`** — Temporal organization mapping for email domains.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | INTEGER PK | Rule ID |
+| `org_id` | INTEGER FK | References organizations(id) |
 | `domain` | TEXT | Email domain |
-| `org` | TEXT | Organization name |
 | `valid_from` | TEXT | Start date (NULL = beginning of time) |
 | `valid_until` | TEXT | End date (NULL = still current) |
+
+**`identity_affiliations`** — Maps identities to organizations with time ranges.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | INTEGER PK | Affiliation ID |
+| `identity_id` | INTEGER FK | References identities(id) |
+| `org_id` | INTEGER FK | References organizations(id) |
+| `valid_from` | TEXT | Start date |
+| `valid_until` | TEXT | End date |
+| `source` | TEXT | How resolved (domain_rule, org_override, alias_override) |
+
+**`commit_org_attribution`** — Per-commit organization attribution.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `commit_hash` | TEXT PK | References commits(hash) |
+| `org_id` | INTEGER FK | References organizations(id) |
+| `org_name` | TEXT | Organization name (denormalized) |
+| `source` | TEXT | How resolved (domain_rule, org_override, etc.) |
+| `matched_email` | TEXT | Email that matched |
+| `matched_domain` | TEXT | Domain that matched |
+| `matched_rule_id` | INTEGER FK | References org_domain_rules(id) |
+
+**`trailer_org_attribution`** — Per-trailer organization attribution.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `commit_hash` | TEXT FK | References commits(hash) |
+| `key` | TEXT | Trailer key |
+| `seq` | INTEGER | Trailer sequence |
+| `org_id` | INTEGER FK | References organizations(id) |
+| `org_name` | TEXT | Organization name (denormalized) |
+| `source` | TEXT | How resolved |
+| `matched_email` | TEXT | Email that matched |
+| `matched_domain` | TEXT | Domain that matched |
+| `matched_rule_id` | INTEGER FK | References org_domain_rules(id) |
+
+**`tags`** — Git tags (lightweight and annotated).
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `name` | TEXT PK | Tag name |
+| `target_commit` | TEXT | Commit SHA the tag points to |
+| `tag_object_hash` | TEXT | Tag object hash (annotated tags only) |
+| `is_annotated` | INTEGER | 1 if annotated tag |
+| `tagger_name` | TEXT | Tagger name (annotated tags only) |
+| `tagger_email` | TEXT | Tagger email (annotated tags only) |
+| `tagger_date` | TEXT | Tagger date (annotated tags only) |
+| `annotation` | TEXT | Tag annotation message |
+| `created_at` | TEXT | Creation timestamp |
+
+**`commit_releases`** — Maps each commit to its containing release.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `commit_hash` | TEXT PK | References commits(hash) |
+| `release_tag` | TEXT FK | References tags(name) |
+| `release_date` | TEXT | Release date |
 
 **`subsystems`** — Subsystem definitions from MAINTAINERS.
 
@@ -420,14 +568,15 @@ use `INSERT OR IGNORE` semantics for idempotent reindexing.
 | `commit_hash` | TEXT UNIQUE | Commit SHA this snapshot was taken at |
 | `created_at` | TEXT | Creation timestamp |
 
-**`blame_lines`** — Line-level blame attribution.
+**`blame_hunks`** — Hunk-level blame attribution.
 
 | Column | Type | Description |
 |--------|------|-------------|
 | `snapshot_id` | INTEGER FK | References blame_snapshots(id) |
 | `path` | TEXT | File path |
-| `line_number` | INTEGER | Line number in file |
-| `orig_commit` | TEXT | Commit that last modified this line |
+| `start_line` | INTEGER | Start line of the hunk |
+| `line_count` | INTEGER | Number of lines in the hunk |
+| `orig_commit` | TEXT | Commit that last modified these lines |
 | `identity_id` | INTEGER FK | References identities(id) |
 
 **`file_ownership`** — Aggregated code ownership per file.
@@ -442,10 +591,12 @@ use `INSERT OR IGNORE` semantics for idempotent reindexing.
 
 ### Views
 
-**`v_commits`** — Commits with resolved identity names and temporal org
-lookup. Falls back to raw author_name/author_email when identity resolution
-hasn't been run. Org is resolved via a correlated subquery against `org_domains`
-with date bounds, falling back to `identities.org`.
+**`v_identity_org`** — Current organization for each identity. Picks the best
+affiliation by priority: alias_override > org_override > domain_rule.
+
+**`v_commits`** — Commits with resolved identity names and org attribution.
+Falls back to raw author_name/author_email when identity resolution hasn't
+been run. Org is resolved via `commit_org_attribution`.
 
 ```sql
 SELECT resolved_author_name, resolved_author_email, author_org, author_is_bot,
@@ -454,21 +605,28 @@ FROM v_commits
 ```
 
 **`v_reviews`** — Review relationships (author + reviewer pairs per commit).
-Filters out bots. Includes org for both author and reviewer.
+Filters out bots. Includes org for both author and reviewer via org attribution
+tables.
 
 **`v_subsystem_activity`** — Commit activity joined through file paths to
 subsystems via `file_subsystems` (requires `maintain` import).
 
 **`v_subsystem_contributors`** — Ranks contributors per subsystem by commit
 count. Includes an `is_reviewer` flag indicating whether the contributor is
-a designated reviewer for that subsystem.
+a designated reviewer for that subsystem, plus `lines_owned` from blame.
+
+**`v_commit_releases`** — Commits joined with their release tag and annotation.
 
 ### Indexes
 
 Indexes on `commits(author_date)`, `commits(ticket)`, `commits(component)`,
 `commits(author_id)`, `trailers(key)`, `trailers(identity_id)`,
-`commit_files(path)`, `commit_files(language)`, `blame_lines(identity_id)`,
-`blame_lines(orig_commit)`.
+`commit_files(path)`, `commit_files(language)`, `blame_hunks(identity_id)`,
+`blame_hunks(orig_commit)`, `org_domain_rules(domain)`,
+`identity_affiliations(identity_id)`, `identity_affiliations(org_id)`,
+`identity_emails(email)`, `commit_hunks(path)`,
+`commit_hunks(path, new_start)`, `tags(target_commit)`, `tags(created_at)`,
+`commit_releases(release_tag)`.
 
 ## Example Queries
 
@@ -515,6 +673,18 @@ SELECT path, count(*) as changes,
 FROM commit_files
 GROUP BY path
 ORDER BY changes DESC
+LIMIT 10;
+```
+
+### Hottest line regions (most-touched)
+
+```sql
+SELECT path, new_start, new_lines,
+       count(DISTINCT commit_hash) as touches
+FROM commit_hunks
+WHERE path = 'some/file.c'
+GROUP BY path, new_start
+ORDER BY touches DESC
 LIMIT 10;
 ```
 
@@ -656,15 +826,18 @@ ORDER BY reviews DESC
 LIMIT 20;
 ```
 
-## Implementation Status
+### Commits per release
 
-| Phase | Status | Description |
-|-------|--------|-------------|
-| 1. Foundation | Done | init, index, query, status |
-| 2. Identity | Done | mailmap import, identity merge, bot detection, backfill |
-| 3. Subsystems | Done | MAINTAINERS parser, file-to-subsystem mapping |
-| 4. Blame | Done | git2 blame, ownership snapshots, parallel execution |
-| 5. Reports | Done | HTML generation via minijinja + embedded Vega-Lite |
+```sql
+SELECT release_tag, count(*) as commits,
+       min(author_date) as first_commit,
+       release_date
+FROM commit_releases cr
+JOIN commits c ON c.hash = cr.commit_hash
+GROUP BY release_tag
+ORDER BY release_date DESC
+LIMIT 10;
+```
 
 ## License
 

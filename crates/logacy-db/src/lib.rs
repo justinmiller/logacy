@@ -1,6 +1,13 @@
 use anyhow::{Context, Result};
+use diesel::prelude::*;
+use diesel::sqlite::SqliteConnection;
+use diesel::Connection as _;
 use rusqlite::Connection;
 use std::path::Path;
+
+pub mod functions;
+pub mod models;
+pub mod schema;
 
 const SCHEMA_VERSION: &str = "1";
 
@@ -8,6 +15,16 @@ pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)
         .with_context(|| format!("failed to open database at {}", path.display()))?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL;")?;
+    Ok(conn)
+}
+
+pub fn open_diesel(path: &Path) -> Result<SqliteConnection> {
+    let url = path.to_string_lossy().to_string();
+    let mut conn = SqliteConnection::establish(&url)
+        .with_context(|| format!("failed to open database at {}", path.display()))?;
+    diesel::sql_query("PRAGMA journal_mode=WAL").execute(&mut conn)?;
+    diesel::sql_query("PRAGMA foreign_keys=ON").execute(&mut conn)?;
+    diesel::sql_query("PRAGMA synchronous=NORMAL").execute(&mut conn)?;
     Ok(conn)
 }
 
@@ -30,13 +47,41 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
 
 pub fn migrate(conn: &Connection) -> Result<()> {
     let version = get_meta(conn, "schema_version")?
-        .unwrap_or_else(|| "1".to_string());
+        .unwrap_or_else(|| "0".to_string());
 
     if version != SCHEMA_VERSION {
         anyhow::bail!(
             "unsupported schema version {version}; expected {SCHEMA_VERSION}. \
              Delete the database and re-run `logacy init`."
         );
+    }
+
+    // Validate required tables exist
+    let required = [
+        "identities",
+        "identity_aliases",
+        "identity_emails",
+        "organizations",
+        "org_domain_rules",
+        "identity_affiliations",
+        "commit_org_attribution",
+        "trailer_org_attribution",
+        "commits",
+        "trailers",
+        "tags",
+        "commit_hunks",
+    ];
+    for table in &required {
+        let exists: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name=?1",
+            [table],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            anyhow::bail!(
+                "required table `{table}` is missing. Delete the database and re-run `logacy init`."
+            );
+        }
     }
 
     Ok(())
@@ -88,7 +133,8 @@ pub fn parse_identity_value(value: &str) -> Option<(String, String)> {
 ///
 /// Lookup order:
 /// 1. Exact email match in identity_aliases
-/// 2. Exact canonical_name match in identities
+/// 2. Exact canonical_name match in identities (for cases where
+///    the email changed but the name is known, e.g. MAINTAINERS entries)
 pub fn resolve_identity(conn: &Connection, name: &str, email: &str) -> Option<i64> {
     resolve_identity_by_email(conn, email).or_else(|| {
         conn.query_row(
@@ -110,6 +156,12 @@ pub fn resolve_identity_by_email(conn: &Connection, email: &str) -> Option<i64> 
     .ok()
 }
 
+/// Extract the domain from an email address.
+/// Returns None for bare identifiers (no @).
+pub fn email_domain(email: &str) -> Option<&str> {
+    email.rsplit_once('@').map(|(_, domain)| domain)
+}
+
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS logacy_meta (
     key   TEXT PRIMARY KEY,
@@ -121,7 +173,6 @@ CREATE TABLE IF NOT EXISTS identities (
     canonical_name  TEXT NOT NULL,
     canonical_email TEXT NOT NULL,
     is_bot          INTEGER NOT NULL DEFAULT 0,
-    org             TEXT,
     UNIQUE(canonical_name, canonical_email)
 );
 
@@ -132,12 +183,34 @@ CREATE TABLE IF NOT EXISTS identity_aliases (
     PRIMARY KEY (email)
 );
 
-CREATE TABLE IF NOT EXISTS org_domains (
-    domain      TEXT NOT NULL,
-    org         TEXT NOT NULL,
-    valid_from  TEXT,
-    valid_until TEXT,
-    PRIMARY KEY (domain, org, valid_from)
+CREATE TABLE IF NOT EXISTS identity_emails (
+    identity_id   INTEGER NOT NULL REFERENCES identities(id),
+    email         TEXT NOT NULL,
+    first_seen_at TEXT,
+    last_seen_at  TEXT,
+    commit_count  INTEGER NOT NULL DEFAULT 0,
+    trailer_count INTEGER NOT NULL DEFAULT 0,
+    source        TEXT NOT NULL DEFAULT 'commit',
+    is_preferred  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (identity_id, email)
+);
+
+CREATE TABLE IF NOT EXISTS organizations (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS org_domain_rules (
+    id          INTEGER PRIMARY KEY,
+    org_id      INTEGER NOT NULL REFERENCES organizations(id),
+    domain      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS identity_affiliations (
+    id          INTEGER PRIMARY KEY,
+    identity_id INTEGER NOT NULL REFERENCES identities(id),
+    org_id      INTEGER NOT NULL REFERENCES organizations(id),
+    source      TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS commits (
@@ -161,11 +234,13 @@ CREATE TABLE IF NOT EXISTS commits (
 );
 
 CREATE TABLE IF NOT EXISTS trailers (
-    commit_hash TEXT NOT NULL REFERENCES commits(hash),
-    key         TEXT NOT NULL,
-    value       TEXT NOT NULL,
-    identity_id INTEGER REFERENCES identities(id),
-    seq         INTEGER NOT NULL,
+    commit_hash  TEXT NOT NULL REFERENCES commits(hash),
+    key          TEXT NOT NULL,
+    value        TEXT NOT NULL,
+    identity_id  INTEGER REFERENCES identities(id),
+    seq          INTEGER NOT NULL,
+    parsed_name  TEXT,
+    parsed_email TEXT,
     PRIMARY KEY (commit_hash, key, seq)
 );
 
@@ -178,6 +253,17 @@ CREATE TABLE IF NOT EXISTS commit_files (
     language    TEXT NOT NULL DEFAULT 'Other',
     category    TEXT NOT NULL DEFAULT 'source',
     PRIMARY KEY (commit_hash, path)
+);
+
+CREATE TABLE IF NOT EXISTS commit_hunks (
+    commit_hash TEXT NOT NULL REFERENCES commits(hash),
+    path        TEXT NOT NULL,
+    old_start   INTEGER NOT NULL,
+    old_lines   INTEGER NOT NULL,
+    new_start   INTEGER NOT NULL,
+    new_lines   INTEGER NOT NULL,
+    seq         INTEGER NOT NULL,
+    PRIMARY KEY (commit_hash, path, seq)
 );
 
 CREATE TABLE IF NOT EXISTS subsystems (
@@ -213,13 +299,14 @@ CREATE TABLE IF NOT EXISTS blame_snapshots (
     UNIQUE(commit_hash)
 );
 
-CREATE TABLE IF NOT EXISTS blame_lines (
+CREATE TABLE IF NOT EXISTS blame_hunks (
     snapshot_id  INTEGER NOT NULL REFERENCES blame_snapshots(id),
     path         TEXT NOT NULL,
-    line_number  INTEGER NOT NULL,
+    start_line   INTEGER NOT NULL,
+    line_count   INTEGER NOT NULL,
     orig_commit  TEXT NOT NULL,
     identity_id  INTEGER NOT NULL REFERENCES identities(id),
-    PRIMARY KEY (snapshot_id, path, line_number)
+    PRIMARY KEY (snapshot_id, path, start_line)
 );
 
 CREATE TABLE IF NOT EXISTS file_ownership (
@@ -231,6 +318,45 @@ CREATE TABLE IF NOT EXISTS file_ownership (
     PRIMARY KEY (snapshot_id, path, identity_id)
 );
 
+CREATE TABLE IF NOT EXISTS commit_org_attribution (
+    commit_hash     TEXT PRIMARY KEY REFERENCES commits(hash),
+    org_id          INTEGER REFERENCES organizations(id),
+    org_name        TEXT,
+    source          TEXT NOT NULL,
+    matched_email   TEXT,
+    matched_domain  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS trailer_org_attribution (
+    commit_hash     TEXT NOT NULL REFERENCES commits(hash),
+    key             TEXT NOT NULL,
+    seq             INTEGER NOT NULL,
+    org_id          INTEGER REFERENCES organizations(id),
+    org_name        TEXT,
+    source          TEXT NOT NULL,
+    matched_email   TEXT,
+    matched_domain  TEXT,
+    PRIMARY KEY (commit_hash, key, seq)
+);
+
+CREATE TABLE IF NOT EXISTS tags (
+    name            TEXT PRIMARY KEY,
+    target_commit   TEXT NOT NULL,
+    tag_object_hash TEXT,
+    is_annotated    INTEGER NOT NULL DEFAULT 0,
+    tagger_name     TEXT,
+    tagger_email    TEXT,
+    tagger_date     TEXT,
+    annotation      TEXT,
+    created_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS commit_releases (
+    commit_hash     TEXT PRIMARY KEY REFERENCES commits(hash),
+    release_tag     TEXT NOT NULL REFERENCES tags(name),
+    release_date    TEXT NOT NULL
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_commits_date      ON commits(author_date);
 CREATE INDEX IF NOT EXISTS idx_commits_ticket    ON commits(ticket);
@@ -240,72 +366,70 @@ CREATE INDEX IF NOT EXISTS idx_trailers_key      ON trailers(key);
 CREATE INDEX IF NOT EXISTS idx_trailers_identity ON trailers(identity_id);
 CREATE INDEX IF NOT EXISTS idx_commit_files_path ON commit_files(path);
 CREATE INDEX IF NOT EXISTS idx_commit_files_language ON commit_files(language);
-CREATE INDEX IF NOT EXISTS idx_blame_lines_identity ON blame_lines(identity_id);
-CREATE INDEX IF NOT EXISTS idx_blame_lines_commit   ON blame_lines(orig_commit);
+CREATE INDEX IF NOT EXISTS idx_blame_hunks_identity ON blame_hunks(identity_id);
+CREATE INDEX IF NOT EXISTS idx_blame_hunks_commit   ON blame_hunks(orig_commit);
+CREATE INDEX IF NOT EXISTS idx_org_domain_rules_domain ON org_domain_rules(domain);
+CREATE INDEX IF NOT EXISTS idx_identity_affiliations_identity ON identity_affiliations(identity_id);
+CREATE INDEX IF NOT EXISTS idx_identity_affiliations_org ON identity_affiliations(org_id);
+CREATE INDEX IF NOT EXISTS idx_identity_emails_email ON identity_emails(email);
+CREATE INDEX IF NOT EXISTS idx_commit_hunks_path ON commit_hunks(path);
+CREATE INDEX IF NOT EXISTS idx_commit_hunks_path_range ON commit_hunks(path, new_start);
+CREATE INDEX IF NOT EXISTS idx_tags_target ON tags(target_commit);
+CREATE INDEX IF NOT EXISTS idx_tags_date ON tags(created_at);
+CREATE INDEX IF NOT EXISTS idx_commit_releases_tag ON commit_releases(release_tag);
 
 -- Views
 
--- Resolve org temporally: check org_domains with date bounds, fall back to identities.org
+-- Per-identity current org: picks the best affiliation.
+-- Priority: alias_override > org_override > domain_rule.
+CREATE VIEW IF NOT EXISTS v_identity_org AS
+SELECT ia.identity_id, o.name AS org
+FROM identity_affiliations ia
+JOIN organizations o ON o.id = ia.org_id
+WHERE ia.id = (
+    SELECT ia2.id FROM identity_affiliations ia2
+    WHERE ia2.identity_id = ia.identity_id
+    ORDER BY
+      CASE ia2.source WHEN 'alias_override' THEN 0 WHEN 'org_override' THEN 1 ELSE 2 END
+    LIMIT 1
+);
+
 CREATE VIEW IF NOT EXISTS v_commits AS
 SELECT c.*,
        COALESCE(i.canonical_name, c.author_name) AS resolved_author_name,
        COALESCE(i.canonical_email, c.author_email) AS resolved_author_email,
-       COALESCE(
-           (SELECT od.org FROM org_domains od
-            WHERE COALESCE(i.canonical_email, c.author_email) LIKE '%@' || od.domain
-              AND (od.valid_from IS NULL OR c.author_date >= od.valid_from)
-              AND (od.valid_until IS NULL OR c.author_date < od.valid_until)
-            ORDER BY od.valid_from DESC
-            LIMIT 1),
-           i.org
-       ) AS author_org,
+       coa.org_name AS author_org,
        i.is_bot AS author_is_bot
 FROM commits c
-LEFT JOIN identities i ON c.author_id = i.id;
+LEFT JOIN identities i ON c.author_id = i.id
+LEFT JOIN commit_org_attribution coa ON coa.commit_hash = c.hash;
 
 CREATE VIEW IF NOT EXISTS v_reviews AS
 SELECT c.hash, c.ticket, c.component,
        author.canonical_name AS author,
        reviewer.canonical_name AS reviewer,
        c.author_date,
-       COALESCE(
-           (SELECT od.org FROM org_domains od
-            WHERE author.canonical_email LIKE '%@' || od.domain
-              AND (od.valid_from IS NULL OR c.author_date >= od.valid_from)
-              AND (od.valid_until IS NULL OR c.author_date < od.valid_until)
-            ORDER BY od.valid_from DESC LIMIT 1),
-           author.org
-       ) AS author_org,
-       COALESCE(
-           (SELECT od.org FROM org_domains od
-            WHERE reviewer.canonical_email LIKE '%@' || od.domain
-              AND (od.valid_from IS NULL OR c.author_date >= od.valid_from)
-              AND (od.valid_until IS NULL OR c.author_date < od.valid_until)
-            ORDER BY od.valid_from DESC LIMIT 1),
-           reviewer.org
-       ) AS reviewer_org
+       coa.org_name AS author_org,
+       toa.org_name AS reviewer_org
 FROM commits c
 JOIN identities author ON c.author_id = author.id
 JOIN trailers t ON t.commit_hash = c.hash AND t.key = 'Reviewed-by'
 JOIN identities reviewer ON t.identity_id = reviewer.id
+LEFT JOIN commit_org_attribution coa ON coa.commit_hash = c.hash
+LEFT JOIN trailer_org_attribution toa
+    ON toa.commit_hash = t.commit_hash AND toa.key = t.key AND toa.seq = t.seq
 WHERE author.is_bot = 0 AND reviewer.is_bot = 0;
 
 CREATE VIEW IF NOT EXISTS v_subsystem_activity AS
 SELECT s.name AS subsystem, c.ticket, c.component, c.author_date,
        i.canonical_name AS author,
-       COALESCE(
-           (SELECT od.org FROM org_domains od
-            WHERE i.canonical_email LIKE '%@' || od.domain
-              AND (od.valid_from IS NULL OR c.author_date >= od.valid_from)
-              AND (od.valid_until IS NULL OR c.author_date < od.valid_until)
-            ORDER BY od.valid_from DESC LIMIT 1),
-           i.org
-       ) AS org
+       coa.org_name AS org
 FROM commits c
 JOIN commit_files cf ON cf.commit_hash = c.hash
 JOIN file_subsystems fs ON fs.path = cf.path
 JOIN subsystems s ON s.id = fs.subsystem_id
-JOIN identities i ON c.author_id = i.id;
+JOIN identities i ON c.author_id = i.id
+LEFT JOIN commit_org_attribution coa ON coa.commit_hash = c.hash;
 
 CREATE VIEW IF NOT EXISTS v_subsystem_contributors AS
 SELECT s.id AS subsystem_id,
@@ -334,4 +458,11 @@ LEFT JOIN (
 ) own ON own.subsystem_id = s.id AND own.identity_id = i.id
 WHERE i.is_bot = 0
 GROUP BY s.id, i.id;
+
+CREATE VIEW IF NOT EXISTS v_commit_releases AS
+SELECT c.*, cr.release_tag, cr.release_date,
+       t.is_annotated, t.annotation
+FROM commits c
+LEFT JOIN commit_releases cr ON cr.commit_hash = c.hash
+LEFT JOIN tags t ON t.name = cr.release_tag;
 "#;

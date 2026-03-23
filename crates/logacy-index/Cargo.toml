@@ -13,3 +13,4 @@ regex.workspace = true
 chrono.workspace = true
 tracing.workspace = true
 indicatif.workspace = true
+glob = "0.3"

@@ -8,6 +8,7 @@ members = [
     "crates/logacy-blame",
     "crates/logacy-maintain",
     "crates/logacy-report",
+    "crates/logacy-web",
 ]
 
 [workspace.package]
@@ -22,9 +23,14 @@ logacy-index = { path = "crates/logacy-index" }
 logacy-blame = { path = "crates/logacy-blame" }
 logacy-maintain = { path = "crates/logacy-maintain" }
 logacy-report = { path = "crates/logacy-report" }
+logacy-web = { path = "crates/logacy-web" }
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors"] }
 
 anyhow = "*"
 clap = { version = "*", features = ["derive"] }
+diesel = { version = "2.2", features = ["sqlite"] }
 gix = { version = "*", default-features = false, features = ["max-performance-safe", "mailmap", "blob-diff"] }
 git2 = "*"
 rusqlite = { version = "*", features = ["bundled"] }

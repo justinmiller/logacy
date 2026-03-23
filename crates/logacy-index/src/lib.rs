@@ -1,10 +1,13 @@
 pub mod identity;
+pub mod tags;
 
+use std::ops::Range;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use gix::bstr::ByteSlice;
 use gix::revision::walk::Sorting;
+use gix::diff::blob::platform::prepare_diff::Operation;
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
 use rusqlite::Connection;
@@ -40,6 +43,13 @@ struct TrailerRow {
     seq: i32,
 }
 
+struct HunkRange {
+    old_start: u32,
+    old_lines: u32,
+    new_start: u32,
+    new_lines: u32,
+}
+
 struct FileChangeRow {
     path: String,
     status: String,
@@ -47,6 +57,7 @@ struct FileChangeRow {
     deletions: Option<i32>,
     language: &'static str,
     category: &'static str,
+    hunks: Vec<HunkRange>,
 }
 
 pub fn run_index(
@@ -66,7 +77,7 @@ pub fn run_index(
     let last_indexed = if opts.full {
         tracing::info!("full reindex requested, clearing commit tables");
         conn.execute_batch(
-            "DELETE FROM commit_files; DELETE FROM trailers; DELETE FROM commits;",
+            "DELETE FROM commit_hunks; DELETE FROM commit_files; DELETE FROM trailers; DELETE FROM commits;",
         )?;
         logacy_db::set_meta(conn, "last_indexed_commit", "")?;
         None
@@ -206,12 +217,17 @@ pub fn run_index(
         )?;
 
         let mut insert_trailer = tx.prepare(
-            "INSERT OR IGNORE INTO trailers (commit_hash, key, value, seq)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT OR IGNORE INTO trailers (commit_hash, key, value, seq, parsed_name, parsed_email)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
 
         let mut insert_file = tx.prepare(
             "INSERT OR IGNORE INTO commit_files (commit_hash, path, status, insertions, deletions, language, category)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
+
+        let mut insert_hunk = tx.prepare(
+            "INSERT OR IGNORE INTO commit_hunks (commit_hash, path, old_start, old_lines, new_start, new_lines, seq)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?;
 
@@ -253,11 +269,18 @@ pub fn run_index(
             ])?;
 
             for trailer in trailers {
+                let (parsed_name, parsed_email) =
+                    match logacy_db::parse_identity_value(&trailer.value) {
+                        Some((n, e)) => (Some(n), Some(e)),
+                        None => (None, None),
+                    };
                 insert_trailer.execute(rusqlite::params![
                     commit.hash,
                     trailer.key,
                     trailer.value,
                     trailer.seq,
+                    parsed_name,
+                    parsed_email,
                 ])?;
             }
 
@@ -271,6 +294,18 @@ pub fn run_index(
                     file.language,
                     file.category,
                 ])?;
+
+                for (seq, hunk) in file.hunks.iter().enumerate() {
+                    insert_hunk.execute(rusqlite::params![
+                        commit.hash,
+                        file.path,
+                        hunk.old_start,
+                        hunk.old_lines,
+                        hunk.new_start,
+                        hunk.new_lines,
+                        seq as i32,
+                    ])?;
+                }
             }
 
             pb.inc(1);
@@ -331,13 +366,38 @@ fn compute_commit_diff_stats(
                     return Ok(std::ops::ControlFlow::Continue(()));
                 }
 
+                let mut file_hunks: Vec<HunkRange> = Vec::new();
                 let (ins, del) = change
                     .diff(resource_cache)
                     .ok()
-                    .and_then(|mut p| p.line_counts().ok().flatten())
-                    .map(|counts| {
-                        let i = counts.insertions as i32;
-                        let d = counts.removals as i32;
+                    .and_then(|p| {
+                        p.resource_cache.options.skip_internal_diff_if_external_is_configured = false;
+                        let prep = p.resource_cache.prepare_diff().ok()?;
+                        match prep.operation {
+                            Operation::InternalDiff { algorithm } => {
+                                let input = prep.interned_input();
+                                let counter = gix::diff::blob::diff(
+                                    algorithm,
+                                    &input,
+                                    gix::diff::blob::sink::Counter::new(
+                                        |before: Range<u32>, after: Range<u32>| {
+                                            file_hunks.push(HunkRange {
+                                                old_start: before.start + 1,
+                                                old_lines: before.end - before.start,
+                                                new_start: after.start + 1,
+                                                new_lines: after.end - after.start,
+                                            });
+                                        },
+                                    ),
+                                );
+                                Some(counter)
+                            }
+                            _ => None,
+                        }
+                    })
+                    .map(|counter| {
+                        let i = counter.insertions as i32;
+                        let d = counter.removals as i32;
                         total_insertions += i as i64;
                         total_deletions += d as i64;
                         (Some(i), Some(d))
@@ -356,6 +416,7 @@ fn compute_commit_diff_stats(
                     deletions: del,
                     language: lang,
                     category: cat,
+                    hunks: file_hunks,
                 });
 
                 Ok::<_, std::convert::Infallible>(std::ops::ControlFlow::Continue(()))
